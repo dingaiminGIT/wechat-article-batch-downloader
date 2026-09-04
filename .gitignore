@@ -1,0 +1,11 @@
+.DS_Store
+.vmark/
+app.log
+mp.json
+gopeed.db
+*.log
+*.db
+mp_article_downloader_src/mp_article_batch_downloader
+mp_article_downloader_src/wx_video_download
+mp_article_downloader_src/wx_video_download*
+mp_article_downloader_src/wx_channel*
