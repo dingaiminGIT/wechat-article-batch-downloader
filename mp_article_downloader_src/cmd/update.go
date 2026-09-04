@@ -268,13 +268,12 @@ func update_from_compressed(rawURL, filename, exePath string) error {
 }
 
 func is_executable_file(name string) bool {
-	// Simple check: name matches our binary name "mp_article_batch_downloader" or "mp_article_batch_downloader"
-	// or ends with .exe on windows
+	// Match the release binary name, including its Windows suffix.
 	base := filepath.Base(name)
 	if runtime.GOOS == "windows" {
-		return strings.EqualFold(base, "mp_article_batch_downloader.exe") || strings.EqualFold(base, "mp_article_batch_downloader.exe")
+		return strings.EqualFold(base, "mp_article_batch_downloader.exe")
 	}
-	return base == "mp_article_batch_downloader" || base == "mp_article_batch_downloader"
+	return base == "mp_article_batch_downloader"
 }
 
 func create_update_http_client() *http.Client {
