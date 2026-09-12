@@ -17,6 +17,9 @@ import (
 )
 
 func parse_cgi_datanew(htmlContent string) (*CgiDataNew, error) {
+	if err := classifyUnavailableArticlePage(htmlContent); err != nil {
+		return nil, err
+	}
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
 	if err != nil {
 		return nil, err
@@ -131,6 +134,22 @@ func parse_cgi_datanew(htmlContent string) (*CgiDataNew, error) {
 	}
 
 	return data, nil
+}
+
+func classifyUnavailableArticlePage(htmlContent string) error {
+	switch {
+	case strings.Contains(htmlContent, "此内容因违规无法查看"):
+		return fmt.Errorf("文章已被微信限制，正文无法查看")
+	case strings.Contains(htmlContent, "该内容已被发布者删除"),
+		strings.Contains(htmlContent, "此内容已被发布者删除"):
+		return fmt.Errorf("文章已被发布者删除")
+	case strings.Contains(htmlContent, "wappoc_appmsgcaptcha"),
+		strings.Contains(htmlContent, "poc_token"),
+		strings.Contains(htmlContent, "当前环境异常") && strings.Contains(htmlContent, "去验证"):
+		return fmt.Errorf("微信公众号凭证已失效或触发访问验证，请在微信重新打开该公众号任意一篇文章后重试")
+	default:
+		return nil
+	}
 }
 
 func escapeHTML(s string) string {

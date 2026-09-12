@@ -3,41 +3,134 @@
 package system
 
 import (
+	"encoding/json"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
-func enable_proxy(args ProxySettings) error {
-	args = merge_default_settings(args)
-	cmd1 := exec.Command("networksetup", "-setwebproxy", args.Device, args.Hostname, args.Port)
-	_, err1 := cmd1.Output()
-	if err1 != nil {
-		return fmt.Errorf("设置 HTTP 代理失败，%v", err1.Error())
-	}
-	cmd2 := exec.Command("networksetup", "-setsecurewebproxy", args.Device, args.Hostname, args.Port)
-	output, err2 := cmd2.Output()
-	if err2 != nil {
-		return fmt.Errorf("设置 HTTPS 代理失败，%v", output)
-	}
-	return nil
+var networkRun = func(args ...string) ([]byte, error) {
+	return exec.Command("/usr/sbin/networksetup", args...).CombinedOutput()
 }
 
-func disable_proxy(args ProxySettings) error {
-	args = merge_default_settings(args)
-	cmd1 := exec.Command("networksetup", "-setwebproxystate", args.Device, "off")
-	_, err1 := cmd1.Output()
-	if err1 != nil {
-		return fmt.Errorf("禁用 HTTP 代理失败，%v", err1.Error())
+// Keep the two protocols independently: they may have different upstream settings.
+type proxySnapshot struct {
+	Device      string
+	HTTP, HTTPS *network_proxy_info
+	Owner       ProxySettings
+}
+
+func snapshotPath() string {
+	if d := os.Getenv("MP_ARCHIVE_DATA"); d != "" {
+		return filepath.Join(d, "proxy-snapshot.json")
 	}
-	cmd2 := exec.Command("networksetup", "-setsecurewebproxystate", args.Device, "off")
-	_, err2 := cmd2.Output()
-	if err2 != nil {
-		return fmt.Errorf("禁用 HTTPS 代理失败，%v", err2.Error())
+	h, _ := os.UserHomeDir()
+	return filepath.Join(h, ".config", "mp-article-batch-downloader", "proxy-snapshot.json")
+}
+func setProxy(device string, secure bool, info *network_proxy_info) error {
+	set, state := "-setwebproxy", "-setwebproxystate"
+	if secure {
+		set, state = "-setsecurewebproxy", "-setsecurewebproxystate"
+	}
+	if info.Server != "" && info.Port != "" && info.Port != "0" {
+		if out, err := networkRun(set, device, info.Server, info.Port); err != nil {
+			return fmt.Errorf("设置代理失败: %s", out)
+		}
+	}
+	enabled := "off"
+	if info.Enabled {
+		enabled = "on"
+	}
+	if out, err := networkRun(state, device, enabled); err != nil {
+		return fmt.Errorf("切换代理失败: %s", out)
 	}
 	return nil
 }
+func isOwned(info *network_proxy_info, owner ProxySettings) bool {
+	return info != nil && info.Server == owner.Hostname && info.Port == owner.Port
+}
+func restoreSnapshot() error {
+	b, err := os.ReadFile(snapshotPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var s proxySnapshot
+	if err = json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	if s.HTTP == nil || s.HTTPS == nil {
+		return fmt.Errorf("代理备份不完整")
+	}
+	for _, pair := range []struct {
+		secure bool
+		info   *network_proxy_info
+	}{{false, s.HTTP}, {true, s.HTTPS}} {
+		cur, e := read_network_proxy(s.Device, pair.secure)
+		if e != nil {
+			return e
+		}
+		// Do not overwrite changes made by another proxy application while we ran.
+		if isOwned(cur, s.Owner) {
+			if e = setProxy(s.Device, pair.secure, pair.info); e != nil {
+				return e
+			}
+		}
+	}
+	return os.Remove(snapshotPath())
+}
+func enable_proxy(args ProxySettings) error {
+	args = merge_default_settings(args)
+	if err := restoreSnapshot(); err != nil {
+		return err
+	}
+	h, e := read_network_proxy(args.Device, false)
+	if e != nil {
+		return e
+	}
+	s, e := read_network_proxy(args.Device, true)
+	if e != nil {
+		return e
+	}
+	// A dead instance of this tool must not be restored as an enabled proxy.
+	for _, info := range []*network_proxy_info{h, s} {
+		if isOwned(info, args) {
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort(args.Hostname, args.Port), 300*time.Millisecond)
+			if err != nil {
+				info.Enabled = false
+			} else {
+				conn.Close()
+				return fmt.Errorf("代理端口已被占用")
+			}
+		}
+	}
+	snap := proxySnapshot{Device: args.Device, HTTP: h, HTTPS: s, Owner: args}
+	b, _ := json.Marshal(snap)
+	if e = os.MkdirAll(filepath.Dir(snapshotPath()), 0700); e != nil {
+		return e
+	}
+	if e = os.WriteFile(snapshotPath(), b, 0600); e != nil {
+		return e
+	}
+	desired := &network_proxy_info{Enabled: true, Server: args.Hostname, Port: args.Port}
+	if e = setProxy(args.Device, false, desired); e != nil {
+		_ = restoreSnapshot()
+		return e
+	}
+	if e = setProxy(args.Device, true, desired); e != nil {
+		_ = restoreSnapshot()
+		return e
+	}
+	return nil
+}
+func disable_proxy(args ProxySettings) error { return restoreSnapshot() }
 
 func fetch_cur_proxy(args ProxySettings) (*ProxySettings, error) {
 	device := args.Device
@@ -85,7 +178,7 @@ func read_network_proxy(device string, secure bool) (*network_proxy_info, error)
 	if secure {
 		command = "-getsecurewebproxy"
 	}
-	output, err := exec.Command("networksetup", command, device).Output()
+	output, err := networkRun(command, device)
 	if err != nil {
 		return nil, fmt.Errorf("读取系统代理失败，%v", err)
 	}

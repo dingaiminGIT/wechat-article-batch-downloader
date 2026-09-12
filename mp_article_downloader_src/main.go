@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/gin-gonic/gin"
 
@@ -19,5 +20,6 @@ func main() {
 	cfg := config.New(AppVer, Mode)
 	if err := cmd.Execute(cfg); err != nil {
 		fmt.Printf("运行失败 %v\n", err.Error())
+		os.Exit(1)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	// "sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GopeedLab/gopeed/pkg/base"
@@ -19,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 
+	"mp_article_batch_downloader/internal/archive"
 	"mp_article_batch_downloader/internal/assets"
 	"mp_article_batch_downloader/internal/channels"
 	downloaderclient "mp_article_batch_downloader/internal/downloader"
@@ -29,6 +31,10 @@ import (
 )
 
 type APIClient struct {
+	taskCreateMu  sync.Mutex
+	taskErrorMu   sync.Mutex
+	taskErrors    map[string]string
+	archive       *archive.Manager
 	downloader    *downloadpkg.Downloader
 	official      *officialaccount.OfficialAccountClient
 	channels      *channels.ChannelsClient
@@ -106,6 +112,8 @@ func NewAPIClient(cfg *APIConfig, parent_logger *zerolog.Logger) *APIClient {
 	client.filehelper.SetSphAutoDownloadCallback(client.autoDownloadSphVideo)
 
 	client.SetupRoutes()
+	client.setupDesktop()
+	client.loadTaskErrors()
 	return client
 }
 
@@ -149,6 +157,8 @@ func (c *APIClient) Start() error {
 		if evt == nil || evt.Task == nil || evt.Task.ID == "" {
 			return
 		}
+		c.recordTaskError(evt)
+		c.pauseFastBatchOnVerification(evt)
 		c.downloader_ws.Broadcast(APIClientWSMessage{
 			Type: "event",
 			Data: evt,
@@ -193,8 +203,11 @@ func (c *APIClient) Start() error {
 }
 
 func (c *APIClient) Stop() error {
+	if c.archive != nil {
+		c.archive.Close()
+	}
 	if c.downloader != nil {
-		c.downloader.Pause(nil)
+		c.downloader.Pause(&downloadpkg.TaskFilter{Statuses: []base.Status{base.DownloadStatusRunning, base.DownloadStatusWait, base.DownloadStatusReady}})
 	}
 	if c.channels != nil {
 		c.channels.Stop()

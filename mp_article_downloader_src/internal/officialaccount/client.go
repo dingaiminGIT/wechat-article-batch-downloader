@@ -2328,7 +2328,7 @@ func (c *OfficialAccountClient) fetchMsgList(logger zerolog.Logger, biz string, 
 	params.Add("a8scene", "1")
 	params.Add("acctmode", "0")
 	params.Add("pass_ticket", existing.PassTicket)
-	referer := `https://mp.weixin.qq.com/mp/profile_ext?${refererParams.toString()}`
+	referer := "https://mp.weixin.qq.com/mp/profile_ext?" + params.Encode()
 	resp, err := c.Fetch(target_url, referer)
 	if err != nil {
 		fmt.Printf("c.Fetch msg list: error: %s\n", err.Error())
@@ -2372,8 +2372,23 @@ func (c *OfficialAccountClient) fetchMsgList(logger zerolog.Logger, biz string, 
 		}
 		return nil, newCodedError(result.CodeFetchMsgFailed, msg, nil)
 	}
+	normalizeMsgPagination(&data, offset)
 	logger.Info().Int("ret", data.Ret).Msg("fetch msg list: completed")
 	return &data, nil
+}
+
+// Recent WeChat responses can report can_msg_continue=0 on every page while
+// still returning a forward next_offset. Treat actual forward progress as the
+// pagination signal and stop only after an empty/non-advancing page.
+func normalizeMsgPagination(data *OfficialMsgListResp, requestedOffset int) {
+	if data == nil {
+		return
+	}
+	if data.MsgCount > 0 && data.NextOffset > requestedOffset {
+		data.HasMore = 1
+		return
+	}
+	data.HasMore = 0
 }
 
 func (c *OfficialAccountClient) CookiesToString() string {

@@ -9,3 +9,7 @@ mp_article_downloader_src/mp_article_batch_downloader
 mp_article_downloader_src/wx_video_download
 mp_article_downloader_src/wx_video_download*
 mp_article_downloader_src/wx_channel*
+macos/.build/
+macos/.swiftpm/
+dist/
+release/

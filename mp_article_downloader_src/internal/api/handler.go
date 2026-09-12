@@ -523,16 +523,40 @@ func articlePlainTextForProbe(content string) string {
 }
 
 // 创建常规下载任务
+type taskCreateError struct {
+	code    int
+	message string
+}
+
+func (e *taskCreateError) Error() string { return e.message }
 func (c *APIClient) handleCreateDownloadTask(ctx *gin.Context) {
 	var body DownloadTaskPayload
-	if err := ctx.ShouldBindJSON(&body); err != nil {
+	if ctx.ShouldBindJSON(&body) != nil {
 		result.Err(ctx, 400, "不合法的参数")
 		return
 	}
+	id, err := c.createDownloadTask(body)
+	if err != nil {
+		if e, ok := err.(*taskCreateError); ok {
+			result.Err(ctx, e.code, e.message)
+		} else {
+			result.Err(ctx, 500, err.Error())
+		}
+		return
+	}
+	result.Ok(ctx, gin.H{"id": id})
+}
+func (c *APIClient) createDownloadTask(body DownloadTaskPayload) (string, error) {
+	c.taskCreateMu.Lock()
+	defer c.taskCreateMu.Unlock()
 
 	// Extract article_id for officialaccount URLs
 	articleID := officialaccountdownload.ExtractArticleID(body.URL)
 	taskPath := filepath.Join(c.cfg.DownloadDir, body.Dir)
+	rel, pathErr := filepath.Rel(c.cfg.DownloadDir, taskPath)
+	if pathErr != nil || filepath.IsAbs(body.Dir) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", &taskCreateError{400, "保存子目录必须位于导出目录内"}
+	}
 	taskName := strings.TrimSuffix(body.Filename, filepath.Ext(body.Filename))
 	if taskName == "" {
 		taskName = body.Filename
@@ -547,38 +571,42 @@ func (c *APIClient) handleCreateDownloadTask(ctx *gin.Context) {
 		sameTarget := filepath.Clean(t.Meta.Opts.Path) == filepath.Clean(taskPath) && t.Meta.Opts.Name == taskName
 		// For officialaccount URLs, compare by article_id label
 		if articleID != "" && t.Meta.Req.Labels != nil && t.Meta.Req.Labels["article_id"] == articleID {
-			if !sameTarget {
+			if filepath.Clean(t.Meta.Opts.Path) != filepath.Clean(taskPath) {
 				continue
 			}
 			filesExist, _ := taskOutputFilesExist(t)
+			if !overwrite && (t.Status == base.DownloadStatusRunning || t.Status == base.DownloadStatusWait || t.Status == base.DownloadStatusReady || t.Status == base.DownloadStatusPause) {
+				return "", &taskCreateError{409, "文章已在下载队列中"}
+			}
 			if overwrite || !filesExist {
 				_ = c.downloader.Delete(&downloadpkg.TaskFilter{IDs: []string{t.ID}}, true)
 				continue
 			}
-			result.Err(ctx, 409, "已存在该下载内容")
-			return
+			return "", &taskCreateError{409, "已存在该下载内容"}
 		}
 		// For other URLs, compare by URL directly
 		if articleID == "" && t.Meta.Req.URL == body.URL && sameTarget {
 			filesExist, _ := taskOutputFilesExist(t)
+			if !overwrite && (t.Status == base.DownloadStatusRunning || t.Status == base.DownloadStatusWait || t.Status == base.DownloadStatusReady || t.Status == base.DownloadStatusPause) {
+				return "", &taskCreateError{409, "文章已在下载队列中"}
+			}
 			if overwrite || !filesExist {
 				_ = c.downloader.Delete(&downloadpkg.TaskFilter{IDs: []string{t.ID}}, true)
 				continue
 			}
-			result.Err(ctx, 409, "已存在该下载内容")
-			return
+			return "", &taskCreateError{409, "已存在该下载内容"}
 		}
 	}
 	if articleID != "" && !overwrite {
-		for _, rel := range []string{
-			filepath.Join("html", taskName+".html"),
-			filepath.Join("markdown", taskName+".md"),
-			filepath.Join("text", taskName+".txt"),
-		} {
-			if _, err := os.Stat(filepath.Join(taskPath, rel)); err == nil {
-				result.Err(ctx, 409, "目标目录已存在该文章文件")
-				return
+		complete := true
+		for _, rel := range []string{filepath.Join("html", taskName+".html"), filepath.Join("markdown", taskName+".md"), filepath.Join("text", taskName+".txt")} {
+			if _, err := os.Stat(filepath.Join(taskPath, rel)); err != nil {
+				complete = false
+				break
 			}
+		}
+		if complete {
+			return "", &taskCreateError{409, "目标目录已存在该文章文件"}
 		}
 	}
 
@@ -604,8 +632,7 @@ func (c *APIClient) handleCreateDownloadTask(ctx *gin.Context) {
 		},
 	)
 	if err != nil {
-		result.Err(ctx, 500, "创建任务失败："+err.Error())
-		return
+		return "", &taskCreateError{500, "创建任务失败：" + err.Error()}
 	}
 	task := c.downloader.GetTask(id)
 	if task != nil {
@@ -616,7 +643,7 @@ func (c *APIClient) handleCreateDownloadTask(ctx *gin.Context) {
 			},
 		})
 	}
-	result.Ok(ctx, gin.H{"id": id})
+	return id, nil
 }
 
 func (c *APIClient) handleFetchTaskList(ctx *gin.Context) {
@@ -641,6 +668,15 @@ func (c *APIClient) handleFetchTaskList(ctx *gin.Context) {
 	if err != nil {
 		page_size_num = 20
 	}
+	if page_num < 1 {
+		page_num = 1
+	}
+	if page_size_num < 1 {
+		page_size_num = 20
+	}
+	if page_size_num > 1000 {
+		page_size_num = 1000
+	}
 	start := (page_num - 1) * page_size_num
 	if start > total {
 		start = total
@@ -657,6 +693,9 @@ func (c *APIClient) handleFetchTaskList(ctx *gin.Context) {
 			_ = json.Unmarshal(data, &item)
 		}
 		exists, expected := taskOutputFilesExist(task)
+		c.taskErrorMu.Lock()
+		item["error"] = c.taskErrors[task.ID]
+		c.taskErrorMu.Unlock()
 		item["files_exist"] = exists
 		item["expected_files"] = expected
 		items = append(items, item)
@@ -679,7 +718,7 @@ func taskOutputFilesExist(task *downloadpkg.Task) (bool, []string) {
 		return false, nil
 	}
 	expected := []string{}
-	if task.Protocol == "officialaccount" && filepath.Ext(taskName) == "" {
+	if task.Protocol == "officialaccount" {
 		expected = []string{
 			filepath.Join(taskPath, "html", taskName+".html"),
 			filepath.Join(taskPath, "markdown", taskName+".md"),
@@ -997,6 +1036,10 @@ func (c *APIClient) handlePauseTask(ctx *gin.Context) {
 		result.Err(ctx, 400, "缺少 feed id 参数")
 		return
 	}
+	if task := c.downloader.GetTask(body.Id); task != nil && task.Protocol == "officialaccount" && task.Status == base.DownloadStatusRunning {
+		result.Err(ctx, 409, "当前文章正在导出，可暂停尚未开始的排队任务")
+		return
+	}
 	c.downloader.Pause(&downloadpkg.TaskFilter{
 		IDs: []string{body.Id},
 	})
@@ -1120,7 +1163,35 @@ func (c *APIClient) handlePlay(ctx *gin.Context) {
 }
 
 func (c *APIClient) handleOpenDownloadDir(ctx *gin.Context) {
-	dir := c.cfg.DownloadDir
+	type openDownloadDirBody struct {
+		Subdir string `json:"subdir"`
+	}
+	body := openDownloadDirBody{}
+	if ctx.Request.ContentLength > 0 {
+		if err := ctx.ShouldBindJSON(&body); err != nil {
+			result.Err(ctx, 400, "参数无效")
+			return
+		}
+	}
+	dir := filepath.Clean(c.cfg.DownloadDir)
+	if subdir := strings.TrimSpace(body.Subdir); subdir != "" {
+		if filepath.IsAbs(subdir) {
+			result.Err(ctx, 400, "子目录无效")
+			return
+		}
+		target := filepath.Clean(filepath.Join(dir, subdir))
+		rel, err := filepath.Rel(dir, target)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			result.Err(ctx, 400, "子目录无效")
+			return
+		}
+		dir = target
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		result.Err(ctx, 404, "下载目录尚未创建")
+		return
+	}
 	if err := system.Open(dir); err != nil {
 		result.Err(ctx, 500, err.Error())
 		return

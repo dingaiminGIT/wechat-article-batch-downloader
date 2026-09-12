@@ -445,47 +445,6 @@
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
   }
-  function format_bytes(bytes) {
-    var n = Number(bytes || 0);
-    if (!Number.isFinite(n) || n <= 0) return "0 B";
-    var units = ["B", "KB", "MB", "GB"];
-    var i = 0;
-    while (n >= 1024 && i < units.length - 1) {
-      n = n / 1024;
-      i += 1;
-    }
-    return `${n >= 10 || i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`;
-  }
-  function get_task_name(task) {
-    return task.name || task?.meta?.opts?.name || task?.meta?.res?.name || task.id || "task";
-  }
-  function get_task_total(task) {
-    return Number(task?.meta?.res?.size || task?.meta?.res?.files?.[0]?.size || 0);
-  }
-  function render_task_status(task) {
-    var progress = task.progress || {};
-    var downloaded = Number(progress.downloaded || 0);
-    var total = get_task_total(task);
-    var status = task.files_exist ? "done" : task.status || "";
-    var parts = [status];
-    if (total > 0) {
-      parts.push(`${Math.min(100, Math.round((downloaded / total) * 100))}%`);
-      parts.push(`${format_bytes(downloaded)}/${format_bytes(total)}`);
-    } else if (downloaded > 0) {
-      parts.push(format_bytes(downloaded));
-    }
-    if (Number(progress.speed || 0) > 0) {
-      parts.push(`${format_bytes(progress.speed)}/s`);
-    }
-    if (task.files_exist === true) {
-      parts.push("文件已存在");
-    } else if (task.status === "done" && task.files_exist === false) {
-      parts.push("文件不存在");
-    }
-    var path = task?.meta?.opts?.path || "";
-    if (path) parts.push(path);
-    return parts.filter(Boolean).join(" · ");
-  }
   function normalize_article_url(url) {
     if (!url) return "";
     var cleaned = String(url).replace(/&amp;/g, "&").replace(/\\\//g, "/");
@@ -558,20 +517,56 @@
     });
     return articles;
   }
+  function article_url_key(rawURL) {
+    try {
+      var url = new URL(normalize_article_url(rawURL), location.href);
+      var biz = url.searchParams.get("__biz") || "";
+      var mid = url.searchParams.get("mid") || "";
+      var idx = url.searchParams.get("idx") || "";
+      var sn = url.searchParams.get("sn") || "";
+      if (biz && mid) return [biz, mid, idx || "1", sn].join(":");
+      return url.origin + url.pathname + url.search;
+    } catch (e) {
+      return String(rawURL || "");
+    }
+  }
+  function append_current_article(articles) {
+    if (location.pathname !== "/s") return articles;
+    var current = collect_current_article();
+    if (!current.url || !current.title) return articles;
+    var key = article_url_key(current.url);
+    if (articles.some(function (article) { return article_url_key(article.url) === key; })) return articles;
+    articles.push({
+      title: current.title,
+      author: current.author || "",
+      url: current.url,
+      publishTime: current.publish_time || "",
+      source: "current-page",
+    });
+    return articles;
+  }
   async function fetch_mp_articles(acct, maxPages, onProgress) {
     var all = [];
     var offset = 0;
     var seen = {};
+    var seenOffsets = {};
     var apiError = null;
+    var completed = false;
+    var pagesRead = 0;
     if (acct && acct.biz) {
       await submit_credential(acct);
     } else {
-      var visibleOnly = scan_visible_articles();
+      var visibleOnly = append_current_article(scan_visible_articles());
       onProgress(`未识别到公众号 biz，已读取当前页面可见文章：${visibleOnly.length} 篇`);
       return visibleOnly;
     }
     for (var page = 0; page < maxPages; page += 1) {
-      onProgress(`正在读取第 ${page + 1}/${maxPages} 页，已发现 ${all.length} 篇`);
+      onProgress(`正在读取第 ${page + 1} 页，已发现 ${all.length} 篇`);
+      if (seenOffsets[offset]) {
+        completed = true;
+        break;
+      }
+      seenOffsets[offset] = true;
       var url = `${get_api_origin()}/api/mp/msg/list?biz=${encodeURIComponent(acct.biz)}&offset=${offset}`;
       var [err, data] = await WXU.request({ method: "GET", url });
       if (err) {
@@ -579,26 +574,34 @@
         break;
       }
       var items = parse_msg_list(data);
+      pagesRead += 1;
+      var previousCount = all.length;
       items.forEach(function (article) {
         var key = article.url;
         if (seen[key]) return;
         seen[key] = true;
         all.push(article);
       });
-      if (!data || !data.can_msg_continue || !data.next_offset || data.next_offset === offset) {
+      var nextOffset = Number(data && data.next_offset);
+      if (items.length === 0 || all.length === previousCount || !Number.isFinite(nextOffset) || nextOffset <= offset) {
+        completed = true;
         break;
       }
-      offset = data.next_offset;
+      offset = nextOffset;
     }
     if (all.length === 0) {
       var visible = scan_visible_articles();
       if (visible.length > 0) {
         onProgress(`历史列表读取失败，已改用当前页面可见文章：${visible.length} 篇`);
-        return visible;
+        return append_current_article(visible);
       }
     }
     if (apiError && all.length === 0) throw apiError;
-    return all;
+    if (apiError) all.partialError = apiError.message || String(apiError);
+    all.pagesRead = pagesRead;
+    all.completed = completed;
+    all.hitLimit = !completed && !apiError;
+    return append_current_article(all);
   }
   async function create_article_task(article, index, dir, onExists) {
     var prefix = String(index + 1).padStart(4, "0");
@@ -648,18 +651,22 @@
         </select>
       </div>
       <div class="mp-batch-row">
-        <input data-role="maxPages" type="number" min="1" max="100" value="20" title="最多读取页数">
+        <select data-role="scanRange" title="读取范围">
+          <option value="all">全部历史</option>
+          <option value="10">最近 10 页</option>
+          <option value="20">最近 20 页</option>
+          <option value="50">最近 50 页</option>
+        </select>
         <button data-action="scan">读取文章</button>
       </div>
       <div class="mp-batch-row">
         <button class="primary" data-action="download" disabled>批量下载</button>
-        <button data-action="records">下载记录</button>
+        <button data-action="records">打开下载目录</button>
       </div>
-      <div class="mp-batch-status" data-role="status">先点“读取文章”。每页约 10 篇；默认保存到下载目录下的“${escape_html(defaultSubdir)}”子目录。</div>
+      <div class="mp-batch-status" data-role="status">默认读取全部历史文章，并保存到下载目录下的“${escape_html(defaultSubdir)}”子目录。</div>
       <div class="mp-batch-list" data-role="list"></div>
     `;
     var state = { articles: [], currentTaskNames: [] };
-    var recordsTimer = null;
     var status = panel.querySelector('[data-role="status"]');
     var list = panel.querySelector('[data-role="list"]');
     var scanBtn = panel.querySelector('[data-action="scan"]');
@@ -674,62 +681,26 @@
     panel.querySelector('[data-action="hide"]').onclick = function () {
       panel.style.display = "none";
     };
-    panel.querySelector('[data-action="records"]').onclick = function () {
-      fetch_task_records().catch(function (error) {
-        setStatus(`读取下载记录失败：${error.message || error}`);
-      });
+    panel.querySelector('[data-action="records"]').onclick = async function () {
+      var subdir = safe_filename(panel.querySelector('[data-role="subdir"]').value || defaultSubdir);
+      await open_download_directory(subdir);
     };
-    async function fetch_task_records() {
-      if (recordsTimer) {
-        clearTimeout(recordsTimer);
-        recordsTimer = null;
-      }
-      try {
-        setBusy(true);
-        var [err, data] = await WXU.request({
-          method: "GET",
-          url: `${get_api_origin()}/api/task/list?status=all&page=1&page_size=1000`,
-        });
-        if (err) throw err;
-        var tasks = Array.isArray(data) ? data : data?.tasks || data?.list || [];
-        var subdir = safe_filename(panel.querySelector('[data-role="subdir"]').value || defaultSubdir);
-        tasks = tasks.filter(function (task) {
-          var path = task?.meta?.opts?.path || "";
-          var name = task?.meta?.opts?.name || get_task_name(task);
-          if (!path.endsWith("/" + subdir)) return false;
-          if (state.currentTaskNames.length === 0) return true;
-          return state.currentTaskNames.includes(name);
-        });
-        var total = tasks.length;
-        var active = tasks.some((task) => !task.files_exist && ["ready", "wait", "running"].includes(task.status));
-        setStatus(`下载记录：${tasks.length}/${total} 个任务${active ? "，5 秒后自动刷新" : ""}`);
-        list.innerHTML = tasks
-          .slice(0, 1000)
-          .map(function (task, index) {
-            return `<span class="mp-batch-item"><span class="mp-batch-item-main">${index + 1}. ${escape_html(get_task_name(task))}</span><span class="mp-batch-item-meta">${escape_html(render_task_status(task))}</span></span>`;
-          })
-          .join("");
-        if (active) {
-          recordsTimer = setTimeout(function () {
-            fetch_task_records().catch(function (error) {
-              setStatus(`自动刷新下载记录失败：${error.message || error}`);
-            });
-          }, 5000);
-        }
-      } finally {
-        setBusy(false);
-      }
-    }
     scanBtn.onclick = async function () {
       try {
         setBusy(true);
         list.innerHTML = "";
-        var maxPages = Number(panel.querySelector('[data-role="maxPages"]').value || 10);
+        var range = panel.querySelector('[data-role="scanRange"]').value || "all";
+        var maxPages = range === "all" ? 2000 : Number(range);
         state.articles = await fetch_mp_articles(acct, maxPages, setStatus);
         downloadBtn.disabled = state.articles.length === 0;
-        setStatus(`读取完成：${state.articles.length} 篇`);
+        if (state.articles.partialError) {
+          setStatus(`部分读取：${state.articles.length} 篇、${state.articles.pagesRead || 0} 页。${state.articles.partialError}，请刷新文章后重试。`);
+        } else if (state.articles.hitLimit) {
+          setStatus(`已读取：${state.articles.length} 篇、${state.articles.pagesRead || 0} 页（已到所选范围上限，后面还有文章）`);
+        } else {
+          setStatus(`已读取全部历史：${state.articles.length} 篇、${state.articles.pagesRead || 0} 页`);
+        }
         list.innerHTML = state.articles
-          .slice(0, 200)
           .map((article, index) => `<span class="mp-batch-item">${index + 1}. ${escape_html(article.title)}</span>`)
           .join("");
       } catch (error) {
@@ -756,8 +727,7 @@
             ok += 1;
           }
         }
-        setStatus(`本次处理 ${state.articles.length} 篇：新建 ${ok} 个，跳过 ${skipped} 个。保存子目录：${subdir}`);
-        await fetch_task_records();
+        setStatus(`本次处理 ${state.articles.length} 篇：新建 ${ok} 个，跳过 ${skipped} 个。点击“打开下载目录”查看文件。`);
       } catch (error) {
         setStatus(`下载任务创建失败：${error.message || error}`);
       } finally {
@@ -776,12 +746,20 @@
     var $btn = render_rss_button(acct);
     $container.appendChild($btn);
   }
-  function DownloaderPanel(props) {
-    return View({}, [
-      Dialog({ store: props.dialog$ }, [DownloaderPanelView({})]),
-    ]);
+  async function open_download_directory(subdir) {
+    var [err] = await WXU.request({
+      method: "POST",
+      url: `${get_api_origin()}/api/open_download_dir`,
+      body: subdir ? { subdir: subdir } : {},
+    });
+    if (err) {
+      WXU.error({ msg: err.message || "暂时无法打开下载目录" });
+      return;
+    }
+    WXU.toast(subdir ? `已打开“${subdir}”下载目录` : "已打开下载目录");
   }
   function insert_download_button() {
+    if (document.getElementById("__mp_download_entry__")) return;
     var $wraps = document.querySelectorAll(".interaction_bar");
     var $container = $wraps[$wraps.length - 1];
     if (window.cgiDataNew.page_type === 2) {
@@ -790,13 +768,12 @@
     if (!$container || !$container.lastElementChild) {
       return;
     }
-    const dialog$ = new Timeless.ui.DialogCore({
-      offsetY: 4,
-    });
+    const dialog$ = { show: function () { open_download_directory(); } };
     var $btn = render_download_button(
       { type: window.cgiDataNew.page_type },
       dialog$,
     );
+    $btn.id = "__mp_download_entry__";
     const { DropdownMenu, Menu, MenuItem } = WUI;
     const dropdown$ = DropdownMenu({
       $trigger: $btn,
@@ -838,7 +815,7 @@
           },
         }),
         MenuItem({
-          label: "下载记录",
+          label: "打开下载目录",
           onClick() {
             dialog$.show();
             dropdown$.hide();
@@ -856,10 +833,6 @@
       dropdown$.hide();
     });
     $container.insertBefore($btn, $container.lastElementChild);
-    const panel$ = DownloaderPanel({ dialog$ });
-    setTimeout(() => {
-      document.body.appendChild(panel$.render());
-    }, 0);
   }
   window.insert_download_button = insert_download_button;
   function build_article_credentials() {

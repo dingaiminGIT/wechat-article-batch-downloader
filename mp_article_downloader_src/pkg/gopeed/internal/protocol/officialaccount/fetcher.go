@@ -1,9 +1,7 @@
 package officialaccountdownload
 
 import (
-	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +18,14 @@ type Fetcher struct {
 	mu         sync.Mutex
 	closed     bool
 	downloaded int64
+	article    *officialaccountdownload.WechatOfficialArticle
+}
+
+func articleRequestInterval(req *base.Request) time.Duration {
+	if req != nil && req.Labels != nil && req.Labels["download_mode"] == "fast" {
+		return officialaccountdownload.FastArticleRequestInterval
+	}
+	return 0
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -41,46 +47,23 @@ func (f *Fetcher) Resolve(req *base.Request) error {
 	}
 	f.DefaultFetcher.Meta.Req = req
 
-	oa := &officialaccountdownload.OfficialAccountDownload{}
+	oa := &officialaccountdownload.OfficialAccountDownload{ArticleRequestInterval: articleRequestInterval(req)}
 
 	// Fetch the article to get the title
 	article, err := oa.FetchArticle(resolveRealURL(req.URL))
 	if err != nil {
 		return err
 	}
+	f.article = article
 
 	// Sanitize filename
 	filename := strings.ReplaceAll(article.Title, "/", "_")
 	filename = strings.ReplaceAll(filename, "\\", "_")
 	filename = strings.TrimSpace(filename)
+	// The batch UI tracks completed articles, so an approximate byte total is
+	// sufficient. Probing every image with HEAD adds a complete extra network
+	// round trip per image and can be slower than the actual export.
 	size := int64(article.ContentLength)
-	if len(article.Images) > 0 {
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		for _, imgURL := range article.Images {
-			if imgURL == "" {
-				continue
-			}
-			wg.Add(1)
-			go func(u string) {
-				defer wg.Done()
-				client := &http.Client{
-					Timeout: 10 * time.Second,
-				}
-				resp, err := client.Head(u)
-				if err != nil {
-					return
-				}
-				defer resp.Body.Close()
-				if resp.ContentLength > 0 {
-					mu.Lock()
-					size += resp.ContentLength
-					mu.Unlock()
-				}
-			}(imgURL)
-		}
-		wg.Wait()
-	}
 
 	f.DefaultFetcher.Meta.Res = &base.Resource{
 		Name: filename,
@@ -105,12 +88,12 @@ func (f *Fetcher) Create(opts *base.Options) error {
 
 func (f *Fetcher) Start() error {
 	go func() {
-		oa := &officialaccountdownload.OfficialAccountDownload{}
+		oa := &officialaccountdownload.OfficialAccountDownload{ArticleRequestInterval: articleRequestInterval(f.DefaultFetcher.Meta.Req)}
 		oa.OnProgress = func(downloaded int64) {
 			f.addProgress(downloaded)
 		}
 		// Use the URL from the request and Path from options
-		baseName := strings.TrimSuffix(f.DefaultFetcher.Meta.Opts.Name, filepath.Ext(f.DefaultFetcher.Meta.Opts.Name))
+		baseName := f.DefaultFetcher.Meta.Opts.Name
 		if strings.TrimSpace(baseName) == "" {
 			baseName = "article"
 		}
@@ -118,7 +101,12 @@ func (f *Fetcher) Start() error {
 		if f.DefaultFetcher.Meta.Req.Labels != nil && f.DefaultFetcher.Meta.Req.Labels["compress"] == "true" {
 			needCompress = true
 		}
-		err := oa.ExportURL(resolveRealURL(f.DefaultFetcher.Meta.Req.URL), f.DefaultFetcher.Meta.Opts.Path, baseName, needCompress)
+		var err error
+		if f.article != nil {
+			err = oa.ExportArticle(f.article, resolveRealURL(f.DefaultFetcher.Meta.Req.URL), f.DefaultFetcher.Meta.Opts.Path, baseName, needCompress)
+		} else {
+			err = oa.ExportURL(resolveRealURL(f.DefaultFetcher.Meta.Req.URL), f.DefaultFetcher.Meta.Opts.Path, baseName, needCompress)
+		}
 		f.DoneCh <- err
 	}()
 	return nil

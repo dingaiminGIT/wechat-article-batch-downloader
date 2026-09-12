@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown"
@@ -34,15 +35,82 @@ type ArticleAuthCredential struct {
 
 var ArticleAuthProvider func(biz string) ArticleAuthCredential
 
+// WeChat starts returning an interactive verification page when article HTML is
+// requested too quickly. Serialize article page requests and keep a small gap;
+// images are downloaded separately and are not subject to this gate.
+var articleRequestGate = struct {
+	sync.Mutex
+	next time.Time
+}{}
+
+// Export tasks may finish at the same time. Keep the shared corpus index update
+// serialized so one task cannot overwrite records written by another task.
+var (
+	articleIndexMu sync.Mutex
+	articleIndexes = make(map[string]*articleJSONLIndex)
+)
+
+type articleJSONLIndex struct {
+	lines     [][]byte
+	positions map[string]int
+}
+
+const (
+	safeArticleRequestInterval = time.Second
+	FastArticleRequestInterval = 500 * time.Millisecond
+)
+
+func waitForArticleRequestSlot(interval time.Duration) {
+	if interval <= 0 {
+		interval = safeArticleRequestInterval
+	}
+	articleRequestGate.Lock()
+	defer articleRequestGate.Unlock()
+	if wait := time.Until(articleRequestGate.next); wait > 0 {
+		time.Sleep(wait)
+	}
+	articleRequestGate.next = time.Now().Add(interval)
+}
+
 type OfficialAccountDownload struct {
 	article    *WechatOfficialArticle
-	OnProgress func(downloaded int64) // callback after each image download, reports bytes downloaded
+	imageMu    sync.Mutex
+	imageCache map[string]cachedImage
+	// ArticleRequestInterval defaults to the conservative one-request-per-second
+	// pace. The desktop app explicitly opts into the faster 500 ms pace.
+	ArticleRequestInterval time.Duration
+	OnProgress             func(downloaded int64) // callback after each image download, reports bytes downloaded
+}
+
+type cachedImage struct {
+	data     []byte
+	mimeType string
 }
 
 func (c *OfficialAccountDownload) reportProgress(n int64) {
 	if c.OnProgress != nil {
 		c.OnProgress(n)
 	}
+}
+
+func (c *OfficialAccountDownload) imageBytes(imgURL string) ([]byte, string, error) {
+	// ExportHTML and Markdown use the same images. Cache them for the lifetime
+	// of one article so each URL is downloaded only once.
+	c.imageMu.Lock()
+	defer c.imageMu.Unlock()
+	if image, ok := c.imageCache[imgURL]; ok {
+		return image.data, image.mimeType, nil
+	}
+	data, mimeType, err := downloadImageBytes(imgURL)
+	if err != nil {
+		return nil, "", err
+	}
+	if c.imageCache == nil {
+		c.imageCache = make(map[string]cachedImage)
+	}
+	c.imageCache[imgURL] = cachedImage{data: data, mimeType: mimeType}
+	c.reportProgress(int64(len(data)))
+	return data, mimeType, nil
 }
 
 func (c *OfficialAccountDownload) SaveURLAsMarkdown(url string, dir_path string) error {
@@ -105,14 +173,17 @@ func (c *OfficialAccountDownload) ExportArticle(article *WechatOfficialArticle, 
 	markdownPath := filepath.Join(markdownDir, baseName+".md")
 	textPath := filepath.Join(textDir, baseName+".txt")
 
+	// Markdown stores local images. Build it first so the self-contained HTML
+	// can reuse those same bytes from memory instead of downloading every image
+	// a second time.
+	if err := c.ConvertHtmlToMarkdownFile(article, markdownPath); err != nil {
+		return err
+	}
 	htmlContent, err := c.BuildHTMLFromArticle(article, needCompress)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0644); err != nil {
-		return err
-	}
-	if err := c.ConvertHtmlToMarkdownFile(article, markdownPath); err != nil {
 		return err
 	}
 	text := articlePlainText(article)
@@ -176,7 +247,12 @@ func chownToSudoUser(paths ...string) {
 }
 
 func cleanExportBaseName(name string) string {
-	name = strings.TrimSuffix(name, filepath.Ext(name))
+	for _, ext := range []string{".html", ".md", ".txt"} {
+		if strings.HasSuffix(strings.ToLower(name), ext) {
+			name = name[:len(name)-len(ext)]
+			break
+		}
+	}
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
 	name = strings.TrimSpace(name)
@@ -217,31 +293,80 @@ func articlePlainText(article *WechatOfficialArticle) string {
 }
 
 func appendArticleJSONL(path string, record ArticleExportRecord) error {
-	var lines [][]byte
-	if existing, err := os.ReadFile(path); err == nil {
-		for _, line := range bytes.Split(existing, []byte{'\n'}) {
-			line = bytes.TrimSpace(line)
-			if len(line) == 0 {
-				continue
+	articleIndexMu.Lock()
+	defer articleIndexMu.Unlock()
+
+	index := articleIndexes[path]
+	if index == nil {
+		index = &articleJSONLIndex{positions: make(map[string]int)}
+		if existing, err := os.ReadFile(path); err == nil {
+			for _, line := range bytes.Split(existing, []byte{'\n'}) {
+				line = bytes.TrimSpace(line)
+				if len(line) == 0 {
+					continue
+				}
+				var old ArticleExportRecord
+				if err := json.Unmarshal(line, &old); err == nil && old.URL != "" {
+					index.positions[old.URL] = len(index.lines)
+				}
+				index.lines = append(index.lines, append([]byte(nil), line...))
 			}
-			var old ArticleExportRecord
-			if err := json.Unmarshal(line, &old); err == nil && old.URL == record.URL {
-				continue
-			}
-			lines = append(lines, line)
 		}
+		articleIndexes[path] = index
 	}
 	line, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	lines = append(lines, line)
+	if position, exists := index.positions[record.URL]; exists {
+		index.lines[position] = line
+		return writeArticleJSONL(path, index.lines)
+	}
+
+	// New downloads are the common path. Append only the new record instead of
+	// decoding and rewriting the entire, steadily growing corpus for every
+	// article. Duplicate URLs still use an atomic rewrite above.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	lineWithNewline := append(append([]byte(nil), line...), '\n')
+	if _, err = file.Write(lineWithNewline); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	index.positions[record.URL] = len(index.lines)
+	index.lines = append(index.lines, line)
+	return nil
+}
+
+func writeArticleJSONL(path string, lines [][]byte) error {
 	var output []byte
 	if len(lines) > 0 {
 		output = bytes.Join(lines, []byte{'\n'})
 		output = append(output, '\n')
 	}
-	return os.WriteFile(path, output, 0644)
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".style_corpus-*.jsonl")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0644); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(output); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 func appendArticleIndex(path string, baseName string, record ArticleExportRecord) error {
@@ -626,9 +751,8 @@ func (c *OfficialAccountDownload) BuildHTMLFromArticle(article *WechatOfficialAr
 	if isImageArticle {
 		htmlContent.WriteString(`<div class="split-container"><div class="split-left"><div class="additional-images">`)
 		for _, imgURL := range article.Images {
-			imgData, mimeType, err := downloadImageBytes(imgURL)
+			imgData, mimeType, err := c.imageBytes(imgURL)
 			if err == nil {
-				c.reportProgress(int64(len(imgData)))
 				if need_compress_img {
 					// Compress image to reduce size
 					compressedData, compressedMime, errCompress := compressImage(imgData)
@@ -747,9 +871,8 @@ func (c *OfficialAccountDownload) BuildHTMLFromArticle(article *WechatOfficialAr
 		doc.Find("img").Each(func(i int, s *goquery.Selection) {
 			imgURL := s.AttrOr("data-src", "")
 			if imgURL != "" {
-				imgData, mimeType, err := downloadImageBytes(imgURL)
+				imgData, mimeType, err := c.imageBytes(imgURL)
 				if err == nil {
-					c.reportProgress(int64(len(imgData)))
 					if need_compress_img {
 						// Compress image to reduce size
 						compressedData, compressedMime, errCompress := compressImage(imgData)
@@ -822,38 +945,23 @@ func (c *OfficialAccountDownload) downloadImage(imgURL string, save_dir string) 
 	filePath := filepath.Join(save_dir, filename)
 
 	// Check if file already exists
-	if _, err := os.Stat(filePath); err == nil {
+	if data, err := os.ReadFile(filePath); err == nil {
+		// Repeated logos and decorations are shared by many articles. Reuse the
+		// existing local file for the embedded HTML as well.
+		c.imageMu.Lock()
+		if c.imageCache == nil {
+			c.imageCache = make(map[string]cachedImage)
+		}
+		c.imageCache[imgURL] = cachedImage{data: data, mimeType: http.DetectContentType(data)}
+		c.imageMu.Unlock()
 		return filename, nil
 	}
 
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", imgURL, nil)
+	data, _, err := c.imageBytes(imgURL)
 	if err != nil {
 		return "", err
 	}
-
-	// Set headers similar to Scrape to avoid anti-hotlinking
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
-	req.Header.Set("Referer", "https://mp.weixin.qq.com/")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	file, err := os.Create(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	_, err = io.Copy(file, resp.Body)
-	if err != nil {
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
 		return "", err
 	}
 
@@ -909,9 +1017,37 @@ func (c *OfficialAccountDownload) FetchArticle(url string) (*WechatOfficialArtic
 }
 
 func (c *OfficialAccountDownload) Scrape(rawURL string) ([]byte, error) {
+	interval := c.ArticleRequestInterval
+	maxAttempts := 1
+	if interval > 0 && interval < safeArticleRequestInterval {
+		maxAttempts = 3
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		requestInterval := interval
+		if attempt > 0 {
+			// A verification response is often a short-lived rate limit. Slow the
+			// retry down before asking the user to reconnect in WeChat.
+			time.Sleep(time.Duration(attempt*3) * time.Second)
+			requestInterval = safeArticleRequestInterval
+		}
+		body, err := c.scrapeOnce(rawURL, requestInterval)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if !isWeChatAccessVerificationError(err) {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *OfficialAccountDownload) scrapeOnce(rawURL string, interval time.Duration) ([]byte, error) {
 	if rawURL == "" {
 		return nil, fmt.Errorf("url is empty")
 	}
+	waitForArticleRequestSlot(interval)
 	targetURL := rawURL
 	var auth ArticleAuthCredential
 	if ArticleAuthProvider != nil {
@@ -951,7 +1087,7 @@ func (c *OfficialAccountDownload) Scrape(rawURL string) ([]byte, error) {
 			}
 		}
 	}
-	client := &http.Client{}
+	client := &http.Client{Timeout: 45 * time.Second}
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
 		return nil, err
@@ -972,20 +1108,45 @@ func (c *OfficialAccountDownload) Scrape(rawURL string) ([]byte, error) {
 	req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
 	if auth.Cookie != "" {
 		req.Header.Set("cookie", auth.Cookie)
-	} else {
-		req.Header.Set("cookie", "ua_id=zfRTujE0WVWbxqqCAAAAAL38AtjljAqWH0xPz_up8gw=; mm_lang=zh_CN; wxuin=69477998648217; xid=27df1e40bdcb601a449dc3afb35016ba; rewardsn=; wxtokenkey=777")
+
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.Request != nil && strings.Contains(resp.Request.URL.Path, "captcha") {
+		return nil, fmt.Errorf("微信要求完成访问验证，请在微信中打开文章后重试")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("微信返回 HTTP %d，请稍后重试", resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
+	if isWeChatVerificationPage(resp, body) {
+		return nil, fmt.Errorf("微信公众号凭证已失效或触发访问验证，请在微信重新打开该公众号任意一篇文章后重试")
+	}
 	return body, err
+}
+
+func isWeChatAccessVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "访问验证") || strings.Contains(message, "凭证已失效")
+}
+
+func isWeChatVerificationPage(resp *http.Response, body []byte) bool {
+	if resp != nil && resp.Request != nil && strings.Contains(resp.Request.URL.Path, "captcha") {
+		return true
+	}
+	text := string(body)
+	return strings.Contains(text, "poc_token") &&
+		(strings.Contains(text, "TCaptcha") || strings.Contains(text, "secitptpage/template/verify"))
 }
 
 // ExtractArticleID extracts a unique article identifier from a WeChat official account URL.

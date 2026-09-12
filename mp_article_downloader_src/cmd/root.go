@@ -125,6 +125,7 @@ type RootCommandArg struct {
 func root_command(cfg *config.Config) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	watchDesktopParent(ctx, stop)
 
 	fmt.Printf("\nv%v\n", cfg.Version)
 	fmt.Printf("")
@@ -184,7 +185,7 @@ func root_command(cfg *config.Config) {
 		if len(filtered) > 0 {
 			api_cfg.CloudflareSphCookie = strings.Join(filtered, "; ")
 			fmt.Println("yuanbao cookie")
-			fmt.Println(api_cfg.CloudflareSphCookie)
+			// Do not print captured authentication cookies.
 		}
 	}))
 	mgr.RegisterServer(interceptor_srv)
