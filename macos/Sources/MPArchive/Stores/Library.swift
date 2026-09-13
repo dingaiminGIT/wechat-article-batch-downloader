@@ -53,7 +53,7 @@ import Foundation
   refreshDownloadFolders()
   do {
    ticks += 1
-   if accounts.isEmpty || ticks % 3 == 0 {
+   if accounts.isEmpty || selected == "welcome" || ticks % 3 == 0 {
     let page: AccountPage = try await api.call("/api/mp/list?page_size=200")
     accounts = (page.list ?? []).sorted{$0.nickname.localizedStandardCompare($1.nickname) == .orderedAscending}
    }

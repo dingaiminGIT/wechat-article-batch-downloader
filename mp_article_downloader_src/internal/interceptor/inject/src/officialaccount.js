@@ -176,7 +176,7 @@
   }
   async function submit_credential(acct) {
     if (!acct.biz || !acct.key) {
-      return;
+      return false;
     }
     WXU.emit(WXU.Events.OfficialAccountRefresh, acct);
     var origin = get_api_origin();
@@ -191,7 +191,39 @@
       WXU.error({
         msg: err.message,
       });
-      return;
+      return false;
+    }
+    return true;
+  }
+
+  async function register_account(acct) {
+    if (!acct || !acct.biz || !acct.key) {
+      return false;
+    }
+    var fingerprint = [acct.biz, acct.uin || "", acct.key].join("|");
+    if (window.__mp_article_registered_credential === fingerprint) {
+      return true;
+    }
+    if (
+      window.__mp_article_registering_credential === fingerprint &&
+      window.__mp_article_register_promise
+    ) {
+      return window.__mp_article_register_promise;
+    }
+    window.__mp_article_registering_credential = fingerprint;
+    window.__mp_article_register_promise = submit_credential(acct).then(function (ok) {
+      if (ok) {
+        window.__mp_article_registered_credential = fingerprint;
+      }
+      return ok;
+    });
+    try {
+      return await window.__mp_article_register_promise;
+    } finally {
+      if (window.__mp_article_registering_credential === fingerprint) {
+        window.__mp_article_registering_credential = "";
+        window.__mp_article_register_promise = null;
+      }
     }
   }
 
@@ -229,7 +261,9 @@
   function connect(acct) {
     return new Promise((resolve, reject) => {
       if (window.__mp_article_batch_ws_connected) {
-        resolve(true);
+        register_account(acct).finally(function () {
+          resolve(true);
+        });
         return;
       }
       const ws = new WebSocket(get_ws_origin() + "/ws/mp");
@@ -239,7 +273,7 @@
         WXU.log({
           msg: "ws/mp connected",
         });
-        submit_credential(acct);
+        register_account(acct);
         var page_title = document.title || acct.nickname || "公众号页面";
         try {
           ws.send(
@@ -637,7 +671,7 @@
     panel.id = "__mp_article_batch_panel__";
     panel.innerHTML = `
       <div class="mp-batch-title">
-        <span>公众号批量下载</span>
+        <span>网页内批量下载（备用）</span>
         <button data-action="hide" title="隐藏">隐藏</button>
       </div>
       <div class="mp-batch-account">${escape_html(acct.nickname || "当前公众号")}<br>${escape_html(acct.biz || "未识别 biz，将尝试读取当前页可见文章")}</div>
@@ -663,7 +697,7 @@
         <button class="primary" data-action="download" disabled>批量下载</button>
         <button data-action="records">打开下载目录</button>
       </div>
-      <div class="mp-batch-status" data-role="status">默认读取全部历史文章，并保存到下载目录下的“${escape_html(defaultSubdir)}”子目录。</div>
+      <div class="mp-batch-status" data-role="status">公众号已自动同步到新应用，无需点击这里。下方操作仅用于直接在当前网页读取和下载。</div>
       <div class="mp-batch-list" data-role="list"></div>
     `;
     var state = { articles: [], currentTaskNames: [] };
@@ -876,20 +910,27 @@
   async function main() {
     if (location.pathname === "/s") {
       var _OfficialAccountCredentials = build_article_credentials();
+      // Account discovery belongs to opening the article itself. The legacy
+      // batch panel may not find its preferred DOM anchor on every WeChat page,
+      // so credential registration must not depend on clicking “读取文章”.
+      register_account(_OfficialAccountCredentials);
       WXU.observe_node(".wx_follow_media", () => {
         setTimeout(() => {
+          var currentCredentials = build_article_credentials();
           insert_style();
           // insert_rss_button(_OfficialAccountCredentials);
-          connect(_OfficialAccountCredentials).catch(function (err) {
+          connect(currentCredentials).catch(function (err) {
             console.log("mp websocket connect failed", err);
           });
-          render_batch_panel(_OfficialAccountCredentials);
+          render_batch_panel(currentCredentials);
           if (window.cgiDataNew) insert_download_button();
         }, 800);
       });
       setTimeout(function () {
+        var currentCredentials = build_article_credentials();
         insert_style();
-        render_batch_panel(_OfficialAccountCredentials);
+        register_account(currentCredentials);
+        render_batch_panel(currentCredentials);
       }, 1500);
       return;
     }
@@ -912,11 +953,15 @@
     if (WXU.config.officialServerDisabled || location.hostname !== "mp.weixin.qq.com") {
       return;
     }
+    var account = location.pathname === "/s" ? build_article_credentials() : build_page_account();
+    if (location.pathname === "/s") {
+      register_account(account);
+    }
     if (document.querySelector("#__mp_article_batch_panel__")) {
       return;
     }
     insert_style();
-    render_batch_panel(location.pathname === "/s" ? build_article_credentials() : build_page_account());
+    render_batch_panel(account);
   }
   insert_channels_style();
   boot_official_account_tools();
