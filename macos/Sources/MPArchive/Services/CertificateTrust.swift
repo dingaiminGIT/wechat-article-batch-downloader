@@ -8,18 +8,19 @@ enum CertificateTrust {
   return certificate
  }
  static func install(_ url: URL) async throws {
-  // Trust Settings authentication needs the GUI application's security session.
-  // Do not run this inside `osascript ... with administrator privileges`.
+  // This local proxy is used only by applications in the current login
+  // session, so user trust is sufficient and avoids an unnecessary admin
+  // authorization flow.
   try await Task.detached {
    let cert = try certificate(from:String(contentsOf:url,encoding:.utf8))
    let added = SecItemAdd([kSecClass:kSecClassCertificate,kSecValueRef:cert] as CFDictionary,nil)
    guard added == errSecSuccess || added == errSecDuplicateItem else {throw failure(added)}
-   let result = SecTrustSettingsSetTrustSettings(cert,.admin,nil)
+   let result = SecTrustSettingsSetTrustSettings(cert,.user,nil)
    guard result == errSecSuccess else {throw failure(result)}
   }.value
  }
  private static func failure(_ status: OSStatus) -> APIError {
   let detail = SecCopyErrorMessageString(status,nil) as String? ?? "系统返回错误"
-  return APIError(code:Int(status),message:"证书授权失败（\(status)）：\(detail)")
+  return APIError(code:Int(status),message:"证书信任失败（\(status)）：\(detail)")
  }
 }

@@ -19,7 +19,7 @@ struct ArticlesView: View {
     }
     if library.options.mode == "date" {HStack {DatePicker("从",selection:$library.after,displayedComponents:.date);DatePicker("至",selection:$library.before,displayedComponents:.date);Spacer()}.fixedSize(horizontal:true,vertical:false)}
     HStack(spacing:8){if library.scan.status == "running"{ProgressView().controlSize(.small)}else{Image(systemName:library.scan.status == "error" ? "exclamationmark.triangle" : "info.circle")};Text(library.scan.message.isEmpty ? "选择范围后读取文章" : library.scan.message).font(.callout);Spacer()}.foregroundStyle(library.scan.status == "error" ? Color.orange : Color.secondary)
-    if !backend.connected {HStack{Text("可尝试使用已有连接读取；若失效，请连接微信后重新打开文章").font(.callout).foregroundStyle(.secondary);Spacer();Button(backend.needsAuthorization ? "授权并连接" : "连接微信"){Task{await backend.connect(authorize:backend.needsAuthorization)}}.disabled(backend.busy)}}
+    if !backend.connected {HStack{Text("可尝试使用已有连接读取；若失效，请连接微信后重新打开文章").font(.callout).foregroundStyle(.secondary);Spacer();Button(backend.needsAuthorization ? "信任并连接" : "连接微信"){Task{await backend.connect(authorize:backend.needsAuthorization)}}.disabled(backend.busy)}}
     if backend.needsAuthorization {Text(backend.message).font(.callout).foregroundStyle(.orange).textSelection(.enabled)}
    }.padding(24)
    if !library.scan.articles.isEmpty && library.hasSavedAccount {HStack{Text("本机已有 \(library.savedAccountCount) 篇").font(.callout);Spacer();Button("打开公众号目录"){library.openSavedAccountDirectory()}}.padding(.horizontal,24).padding(.bottom,16)}

@@ -58,8 +58,8 @@ struct WelcomeView: View {
     HStack(spacing:12){Label("Markdown",systemImage:"doc.text");Label("纯文本",systemImage:"text.alignleft");Label("HTML 与图片",systemImage:"photo.on.rectangle");Label("JSONL 语料",systemImage:"curlybraces")}.font(.caption).foregroundStyle(.secondary)
     Divider()
     VStack(alignment:.leading,spacing:24) {
-     step("1",title:"连接电脑微信",detail:"首次连接由 macOS 授权一次；以后连接无需重复输入密码。连接期间保持应用运行。") {
-      Button(backend.connected ? "已连接微信" : backend.needsAuthorization ? "授权并连接" : "连接微信") {Task{await backend.connect(authorize:backend.needsAuthorization)}}.buttonStyle(.borderedProminent).disabled(backend.busy || backend.connected || !backend.running)
+     step("1",title:"连接电脑微信",detail:"首次连接将证书加入当前用户的信任列表；以后连接无需重复操作。连接期间保持应用运行。") {
+      Button(backend.connected ? "已连接微信" : backend.needsAuthorization ? "信任并连接" : "连接微信") {Task{await backend.connect(authorize:backend.needsAuthorization)}}.buttonStyle(.borderedProminent).disabled(backend.busy || backend.connected || !backend.running)
      }
      step("2",title:"打开目标公众号的一篇文章",detail:"在微信里打开你想归档的公众号文章，识别后会出现在左侧。无需管理该公众号。") {
       Button("打开微信"){NSWorkspace.shared.open(URL(fileURLWithPath:"/Applications/WeChat.app"))}.buttonStyle(.bordered)

@@ -13,6 +13,9 @@ import Foundation
  let downloads: URL
  let binary: URL
  var config: URL {dataDirectory.appendingPathComponent("config.yaml")}
+ var certificateDirectory: URL {FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/mp-article-batch-downloader/certs")}
+ var certificate: URL {certificateDirectory.appendingPathComponent("root-ca.pem")}
+ var certificateKey: URL {certificateDirectory.appendingPathComponent("root-ca-key.pem")}
  init() {
   let fm = FileManager.default
   dataDirectory = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MPArticleDownloader")
@@ -43,7 +46,7 @@ import Foundation
    await stopProcess()
    if process?.isRunning == true {throw APIError(code:0,message:"后台仍在收尾，请稍后重试")}
    // JSON is a YAML subset; encoding paths this way avoids escaping and injection problems.
-   let configuration: [String:Any] = ["api":["hostname":"127.0.0.1","port":2132,"protocol":"http"],"proxy":["system":connect,"hostname":"127.0.0.1","port":2133,"skipInstallRootCert":true],"download":["dir":downloads.path,"playDoneAudio":false],"mp":["disabled":false,"refreshToken":"mp-archive-local"],"cert":["name":"MP Article Batch Downloader Local CA","file":FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/mp-article-batch-downloader/certs/root-ca.pem").path,"key":FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/mp-article-batch-downloader/certs/root-ca-key.pem").path]]
+   let configuration: [String:Any] = ["api":["hostname":"127.0.0.1","port":2132,"protocol":"http"],"proxy":["system":connect,"hostname":"127.0.0.1","port":2133,"skipInstallRootCert":true],"download":["dir":downloads.path,"playDoneAudio":false],"mp":["disabled":false,"refreshToken":"mp-archive-local"],"cert":["name":"MP Article Batch Downloader Local CA","file":certificate.path,"key":certificateKey.path]]
    try JSONSerialization.data(withJSONObject: configuration, options: [.prettyPrinted,.sortedKeys,.withoutEscapingSlashes]).write(to: config, options: .atomic)
    try await restoreNetworkIfNeeded()
    let log = dataDirectory.appendingPathComponent("service.log")
@@ -65,7 +68,6 @@ import Foundation
  func connect(authorize: Bool = false) async {
   guard !busy else{return};busy = true;message = "正在检查微信连接环境"
   do {
-   let certificate = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/mp-article-batch-downloader/certs/root-ca.pem")
    var result = try await Self.run("/usr/bin/security",["verify-cert","-c",certificate.path])
    if result.0 != 0,authorize {
     NSApp.activate(ignoringOtherApps:true)
@@ -77,7 +79,7 @@ import Foundation
    if result.0 != 0 {
     needsAuthorization = true
     let detail = result.1.trimmingCharacters(in:.whitespacesAndNewlines)
-    message = authorize ? "授权未完成：\(detail.isEmpty ? "系统返回错误 \(result.0)" : String(detail.prefix(1600)))" : "首次连接需要管理员授权。点击“授权并连接”后输入本机密码。"
+    message = authorize ? "证书信任未完成：\(detail.isEmpty ? "系统返回错误 \(result.0)" : String(detail.prefix(1600)))" : "首次连接需要信任本机证书。点击“信任并连接”继续。"
     busy = false;return
    }
    needsAuthorization = false;busy = false;await launch(connect: true)

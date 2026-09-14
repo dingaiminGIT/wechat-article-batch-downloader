@@ -582,17 +582,11 @@ func EnsureDirIfMissing(path string) error {
 func LoadCertFiles() (*certificate.CertFileAndKeyFile, error) {
 	cert_filepath := viper.GetString("cert.file")
 	certkey_filepath := viper.GetString("cert.key")
-	if cert_filepath != "" && certkey_filepath != "" {
-		if cert_bytes, err := os.ReadFile(cert_filepath); err == nil {
-			if certkey_bytes, err2 := os.ReadFile(certkey_filepath); err2 == nil {
-				certname := viper.GetString("cert.name")
-				return &certificate.CertFileAndKeyFile{
-					Name:       certname,
-					Cert:       cert_bytes,
-					PrivateKey: certkey_bytes,
-				}, nil
-			}
+	if cert_filepath != "" || certkey_filepath != "" {
+		if cert_filepath == "" || certkey_filepath == "" {
+			return nil, errors.New("cert.file and cert.key must both be configured")
 		}
+		return certificate.LoadOrCreate(cert_filepath, certkey_filepath, viper.GetString("cert.name"))
 	}
 
 	var dirs []string

@@ -1,6 +1,20 @@
 # 公众号文章下载器实机验证
 
-更新时间：2026-09-13 08:38（本机 Apple Silicon Mac）。
+更新时间：2026-09-14 22:55（本机 Apple Silicon Mac）。
+
+## 1.0.2 证书兼容修复
+
+| 检查 | 实际结果 |
+|---|---|
+| v1.0.1 反证 | 在隔离 HOME 中预置无效的 `~/.mitmproxy/mitmproxy-ca-cert.pem` 与 `mitmproxy-ca.pem`，从公开 v1.0.1 ZIP 解压出的后端错误选择旧文件，代理因 `failed to decode certificate PEM` 退出 |
+| 显式路径优先 | 同一隔离场景使用修复后二进制，成功在配置指定的 `~/.config/mp-article-batch-downloader/certs/` 生成 `root-ca.pem` 与 `root-ca-key.pem`，API 和代理均启动 |
+| 私钥权限 | 发布验证脚本确认新私钥仅当前用户可读写，未向组或其他用户开放权限 |
+| 旧文件保护 | 测试只读取伪造的 `~/.mitmproxy` 作为冲突条件，不会重命名、覆盖或删除用户已有证书 |
+| Go 回归测试 | `internal/config` 和 `pkg/certificate` 新增显式路径、旧 mitmproxy 残留、自定义路径复用及残缺证书对测试；完整相关 Go 测试通过 |
+| Swift 构建测试 | macOS SwiftPM 构建完成，现有 6 项测试全部通过；证书信任域改为当前用户，不再需要管理员密码 |
+| 成品门禁 | `package_release.sh` 解压生成的 ZIP、校验代码签名，并对 ZIP 内后端再次运行证书优先级验证 |
+
+发布验证入口：`python3 script/verify_certificate_precedence.py /path/to/mp_article_batch_downloader`。
 
 ## 2026-09-13 自动识别回归验证
 
@@ -9,7 +23,7 @@
 - 新应用左侧公众号数量由5变为6，并显示“南方都市报 · 最近已连接”。
 - 自动化回归脚本验证文章页即使找不到旧面板依赖的 DOM 节点，也会主动调用公众号凭证同步接口。
 
-## 本次实际修复
+## 此前 1.0.0 管理员信任修复记录
 
 用户输入管理员密码后仍停留在“授权并连接”。捕获到的原始错误是：
 

@@ -47,6 +47,8 @@ VERIFY="$STAGE/verify"
 mkdir -p "$VERIFY"
 ditto -x -k "$ASSET" "$VERIFY"
 codesign --verify --deep --strict "$VERIFY/公众号文章下载器.app"
+python3 "$PROJECT_DIR/script/verify_certificate_precedence.py" \
+  "$VERIFY/公众号文章下载器.app/Contents/Resources/mp_article_batch_downloader"
 
 ls -lh "$ASSET" "$ASSET.sha256"
 cat "$ASSET.sha256"

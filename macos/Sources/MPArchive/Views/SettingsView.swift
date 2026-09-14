@@ -11,10 +11,10 @@ struct SettingsView: View {
    Section("微信连接") {
     Text(backend.message).foregroundStyle(.secondary).textSelection(.enabled)
     HStack {
-     Button(backend.connected ? "断开微信连接" : backend.needsAuthorization ? "授权并连接" : "连接微信") {Task{if backend.connected{await backend.launch()}else{await backend.connect(authorize:backend.needsAuthorization)}}}.disabled(backend.busy || !backend.running)
+     Button(backend.connected ? "断开微信连接" : backend.needsAuthorization ? "信任并连接" : "连接微信") {Task{if backend.connected{await backend.launch()}else{await backend.connect(authorize:backend.needsAuthorization)}}}.disabled(backend.busy || !backend.running)
      Button("恢复网络配置"){Task{await backend.recover()}}.disabled(backend.busy)
     }
-    Text("连接期间使用本机代理读取微信文章；断开或退出会恢复连接前的代理配置。证书只在首次连接时授权，退出应用不会删除证书。").font(.caption).foregroundStyle(.secondary)
+    Text("连接期间使用本机代理读取微信文章；断开或退出会恢复连接前的代理配置。证书只在首次连接时加入当前用户的信任列表，退出应用不会删除证书。").font(.caption).foregroundStyle(.secondary)
    }
    Section("导出位置") {
     Text(chosenDirectory.isEmpty ? backend.downloads.path : chosenDirectory).font(.callout).textSelection(.enabled)
@@ -31,7 +31,7 @@ struct SettingsView: View {
     Text(library.downloadModeDescription).font(.caption).foregroundStyle(library.downloadMode == "fast" ? Color.orange : Color.secondary)
    }
    Section("应用与诊断") {
-    Text("公众号文章下载器 1.0.1 · 本机运行")
+    Text("公众号文章下载器 1.0.2 · 本机运行")
     Button("打开诊断目录"){NSWorkspace.shared.open(backend.dataDirectory)}
     Text("历史读取状态和下载目录信息保存在本机。关闭窗口会继续运行；退出应用会结束连接，未完成的历史读取可在下次继续。").font(.caption).foregroundStyle(.secondary)
    }
