@@ -2,16 +2,20 @@ package api
 
 import (
 	"encoding/json"
-	downloadpkg "github.com/GopeedLab/gopeed/pkg/download"
-	"github.com/gin-gonic/gin"
-	"mp_article_batch_downloader/internal/archive"
-	result "mp_article_batch_downloader/internal/util"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	downloadpkg "github.com/GopeedLab/gopeed/pkg/download"
+	"github.com/gin-gonic/gin"
+	"mp_article_batch_downloader/internal/archive"
+	"mp_article_batch_downloader/internal/officialaccount"
+	result "mp_article_batch_downloader/internal/util"
 )
 
 type downloadBatchSummary struct {
@@ -116,47 +120,97 @@ func summarizeDownloadBatches(tasks []*downloadpkg.Task, taskErrors map[string]s
 	return result
 }
 
+func parseMsgListPage(r *officialaccount.OfficialMsgListResp) (archive.Page, error) {
+	if r == nil {
+		return archive.Page{}, fmt.Errorf("微信未返回文章列表")
+	}
+	p := archive.Page{More: r.HasMore != 0, Next: r.NextOffset}
+	if strings.TrimSpace(r.MsgList) == "" {
+		if r.MsgCount == 0 && !p.More {
+			return p, nil
+		}
+		return archive.Page{}, fmt.Errorf("微信返回的文章列表为空，但本页仍应有文章")
+	}
+	type item struct {
+		Title  string            `json:"title"`
+		URL    string            `json:"content_url"`
+		Digest string            `json:"digest"`
+		Multi  []json.RawMessage `json:"multi_app_msg_item_list"`
+	}
+	var raw struct {
+		List []struct {
+			Info struct {
+				Time int64 `json:"datetime"`
+			} `json:"comm_msg_info"`
+			Ext item `json:"app_msg_ext_info"`
+		} `json:"list"`
+	}
+	if e := json.Unmarshal([]byte(r.MsgList), &raw); e != nil {
+		return archive.Page{}, fmt.Errorf("微信返回的文章列表不完整：%w", e)
+	}
+	if r.MsgCount > 0 && len(raw.List) == 0 {
+		return archive.Page{}, fmt.Errorf("微信标记本页有 %d 条消息，但文章列表为空", r.MsgCount)
+	}
+	for _, msg := range raw.List {
+		items := []item{msg.Ext}
+		for _, b := range msg.Ext.Multi {
+			var child item
+			if json.Unmarshal(b, &child) == nil {
+				items = append(items, child)
+			}
+		}
+		for _, a := range items {
+			u := archive.StableURL(a.URL)
+			if u == "" || a.Title == "" {
+				continue
+			}
+			p.Articles = append(p.Articles, archive.Article{ID: archive.ID(u), Title: a.Title, URL: u, Digest: a.Digest, Published: msg.Info.Time})
+		}
+	}
+	return p, nil
+}
+
+func fetchArchivePage(fetch func(string, int) (*officialaccount.OfficialMsgListResp, error), biz string, offset int) (archive.Page, error) {
+	var emptyOffset int
+	var emptySeen bool
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		r, err := fetch(biz, offset)
+		if err != nil {
+			return archive.Page{}, err
+		}
+		page, err := parseMsgListPage(r)
+		if err == nil {
+			// A zero-count page might be the real end or a transient empty reply.
+			// Confirm it at the same requested offset before marking a scan complete.
+			if r.MsgCount == 0 && !page.More && len(page.Articles) == 0 {
+				if emptySeen && r.NextOffset == emptyOffset {
+					return page, nil
+				}
+				emptySeen = true
+				emptyOffset = r.NextOffset
+				lastErr = fmt.Errorf("微信返回空页，尚不能确认历史已读完")
+			} else {
+				return page, nil
+			}
+		} else {
+			emptySeen = false
+			lastErr = err
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 300 * time.Millisecond)
+		}
+	}
+	return archive.Page{}, lastErr
+}
+
 func (c *APIClient) setupDesktop() {
 	c.archive = archive.New(filepath.Join(c.cfg.RootDir, "scans"), func(biz string, offset int) (archive.Page, error) {
-		r, e := c.official.FetchMsgList(biz, offset)
-		if e != nil {
-			return archive.Page{}, e
+		page, err := fetchArchivePage(c.official.FetchMsgList, biz, offset)
+		if err != nil {
+			c.logger.Warn().Str("biz", biz).Int("offset", offset).Err(err).Msg("archive page failed")
 		}
-		type item struct {
-			Title  string            `json:"title"`
-			URL    string            `json:"content_url"`
-			Digest string            `json:"digest"`
-			Multi  []json.RawMessage `json:"multi_app_msg_item_list"`
-		}
-		var raw struct {
-			List []struct {
-				Info struct {
-					Time int64 `json:"datetime"`
-				} `json:"comm_msg_info"`
-				Ext item `json:"app_msg_ext_info"`
-			} `json:"list"`
-		}
-		if e = json.Unmarshal([]byte(r.MsgList), &raw); e != nil {
-			return archive.Page{}, e
-		}
-		p := archive.Page{More: r.HasMore != 0, Next: r.NextOffset}
-		for _, msg := range raw.List {
-			items := []item{msg.Ext}
-			for _, b := range msg.Ext.Multi {
-				var child item
-				if json.Unmarshal(b, &child) == nil {
-					items = append(items, child)
-				}
-			}
-			for _, a := range items {
-				u := archive.StableURL(a.URL)
-				if u == "" || a.Title == "" {
-					continue
-				}
-				p.Articles = append(p.Articles, archive.Article{ID: archive.ID(u), Title: a.Title, URL: u, Digest: a.Digest, Published: msg.Info.Time})
-			}
-		}
-		return p, nil
+		return page, err
 	})
 	c.engine.POST("/api/desktop/queue", func(ctx *gin.Context) {
 		var items []DownloadTaskPayload

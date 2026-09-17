@@ -31,12 +31,14 @@ struct SettingsView: View {
     Text(library.downloadModeDescription).font(.caption).foregroundStyle(library.downloadMode == "fast" ? Color.orange : Color.secondary)
    }
    Section("应用与诊断") {
-    Text("公众号文章下载器 1.0.2 · 本机运行")
+    Text("公众号文章下载器 \(appVersion) · \(buildChannel)")
     Button("打开诊断目录"){NSWorkspace.shared.open(backend.dataDirectory)}
     Text("历史读取状态和下载目录信息保存在本机。关闭窗口会继续运行；退出应用会结束连接，未完成的历史读取可在下次继续。").font(.caption).foregroundStyle(.secondary)
    }
   }.formStyle(.grouped).padding(12)
  }
+ private var appVersion: String {Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "开发版"}
+ private var buildChannel: String {Bundle.main.object(forInfoDictionaryKey:"MPArchiveChannel") as? String ?? "本机运行"}
  private func exportZIP() {
   let panel = NSSavePanel();panel.nameFieldStringValue = "公众号文章归档.zip";panel.allowedContentTypes = [.zip]
   guard panel.runModal() == .OK,let url = panel.url else{return}

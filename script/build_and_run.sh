@@ -4,7 +4,7 @@ MODE="${1:-run}"
 export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUNDLE="$PROJECT_DIR/dist/公众号文章下载器.app"
-if pgrep -x MPArchive >/dev/null; then
+if [[ "$MODE" != "--build-only" ]] && pgrep -x MPArchive >/dev/null; then
   # The app's backend watches its parent and restores the proxy when it exits.
   pkill -TERM -x MPArchive
   for i in {1..80}; do pgrep -x MPArchive >/dev/null || break; sleep 0.1; done
@@ -27,8 +27,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>公众号文章下载器</string>
 <key>CFBundleDisplayName</key><string>公众号文章下载器</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.2</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>1.0.3</string>
+<key>CFBundleVersion</key><string>4</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>

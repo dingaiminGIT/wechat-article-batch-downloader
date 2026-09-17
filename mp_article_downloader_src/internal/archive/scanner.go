@@ -67,6 +67,10 @@ func New(dir string, fetch Fetch) *Manager {
 			if s.Status == "running" {
 				s.Status = "paused"
 				s.Message = "上次读取已中断，可从断点继续"
+			} else if s.Status == "error" && strings.HasPrefix(s.Message, "读取未完成：") {
+				// Old versions showed low-level fetch errors directly in the UI.
+				s.Status = "paused"
+				s.Message = "读取进度已保存。请在微信重新打开文章后继续读取。"
 			}
 			m.scans[s.Options.Biz] = &s
 		}
@@ -186,7 +190,7 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 		}
 		p, err := m.fetch(s.Options.Biz, s.Offset)
 		if err != nil {
-			finish("error", "读取未完成："+err.Error()+"。请在微信重新打开文章后继续。")
+			finish("paused", fmt.Sprintf("已保存 %d 篇文章和读取进度。微信暂时没有返回完整列表，请在微信重新打开文章后继续读取。", len(s.Articles)))
 			return
 		}
 		select {
@@ -230,7 +234,7 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 			return
 		}
 		if badOffset {
-			finish("error", "微信未返回有效的下一页，历史读取尚未完成")
+			finish("paused", "微信暂时没有返回下一页，已保存读取进度，稍后可继续读取。")
 			return
 		}
 		select {

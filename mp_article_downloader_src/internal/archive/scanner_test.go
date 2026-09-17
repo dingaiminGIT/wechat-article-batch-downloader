@@ -1,8 +1,11 @@
 package archive
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,9 +60,12 @@ func TestPartialFailureResumesPersistedOffset(t *testing.T) {
 	if e := m.Start(Options{Biz: "x", Mode: "all"}); e != nil {
 		t.Fatal(e)
 	}
-	s := awaitStatus(t, m, "x", "error")
+	s := awaitStatus(t, m, "x", "paused")
 	if len(s.Articles) != 1 || s.Offset != 10 {
 		t.Fatalf("lost checkpoint: %+v", s)
+	}
+	if s.Message == "" || strings.Contains(s.Message, "expired") {
+		t.Fatalf("technical error leaked into the UI: %+v", s)
 	}
 	fail.Store(false)
 	m2 := New(dir, fetch)
@@ -111,7 +117,23 @@ func TestPauseInFlightPreservesPage(t *testing.T) {
 func TestBadOffsetNotComplete(t *testing.T) {
 	m := New(t.TempDir(), func(string, int) (Page, error) { return Page{More: true, Next: 0}, nil })
 	_ = m.Start(Options{Biz: "x", Mode: "all"})
-	awaitStatus(t, m, "x", "error")
+	awaitStatus(t, m, "x", "paused")
+}
+
+func TestLegacyFetchErrorLoadsAsFriendlyPausedScan(t *testing.T) {
+	dir := t.TempDir()
+	old := Scan{Options: Options{Biz: "x", Mode: "all"}, Status: "error", Message: "读取未完成：unexpected end of JSON input。请在微信重新打开文章后继续。", Offset: 10}
+	b, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "old.json"), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(dir, nil).Get("x")
+	if s.Status != "paused" || strings.Contains(s.Message, "JSON") || s.Offset != 10 {
+		t.Fatalf("legacy error was not migrated: %+v", s)
+	}
 }
 func TestDiskFailureDoesNotLaunchScan(t *testing.T) {
 	p := t.TempDir() + "/file"

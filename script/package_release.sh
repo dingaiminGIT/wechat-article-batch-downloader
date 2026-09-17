@@ -2,9 +2,9 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_APP="$PROJECT_DIR/dist/公众号文章下载器.app"
-OUTPUT_DIR="$PROJECT_DIR/release"
-ASSET="$OUTPUT_DIR/MPArticleDownloader-macOS-arm64.zip"
+SOURCE_APP="${PACKAGE_SOURCE_APP:-$PROJECT_DIR/dist/公众号文章下载器.app}"
+ASSET="${PACKAGE_ASSET:-$PROJECT_DIR/release/MPArticleDownloader-macOS-arm64.zip}"
+OUTPUT_DIR="$(dirname "$ASSET")"
 
 if [[ ! -d "$SOURCE_APP" ]]; then
   echo "未找到应用包，请先运行 ./script/build_and_run.sh --build-only" >&2

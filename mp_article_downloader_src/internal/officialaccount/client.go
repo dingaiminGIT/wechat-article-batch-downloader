@@ -2348,6 +2348,9 @@ func (c *OfficialAccountClient) fetchMsgList(logger zerolog.Logger, biz string, 
 	if err != nil {
 		return nil, newCodedError(result.CodeFetchMsgFailed, "读取响应失败", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, newCodedError(result.CodeFetchMsgFailed, fmt.Sprintf("微信接口返回 HTTP %d", resp.StatusCode), nil)
+	}
 	var data OfficialMsgListResp
 	err = json.Unmarshal(resp_bytes, &data)
 	if err != nil {
@@ -2372,8 +2375,16 @@ func (c *OfficialAccountClient) fetchMsgList(logger zerolog.Logger, biz string, 
 		}
 		return nil, newCodedError(result.CodeFetchMsgFailed, msg, nil)
 	}
+	rawHasMore := data.HasMore
 	normalizeMsgPagination(&data, offset)
-	logger.Info().Int("ret", data.Ret).Msg("fetch msg list: completed")
+	logger.Info().
+		Int("http_status", resp.StatusCode).
+		Int("msg_count", data.MsgCount).
+		Int("next_offset", data.NextOffset).
+		Int("msg_list_length", len(data.MsgList)).
+		Int("can_msg_continue", rawHasMore).
+		Int("has_more", data.HasMore).
+		Msg("fetch msg list: completed")
 	return &data, nil
 }
 

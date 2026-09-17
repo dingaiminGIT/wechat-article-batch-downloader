@@ -7,7 +7,107 @@ import (
 	"time"
 
 	downloadpkg "github.com/GopeedLab/gopeed/pkg/download"
+	"mp_article_batch_downloader/internal/archive"
+	"mp_article_batch_downloader/internal/officialaccount"
 )
+
+func TestParseMsgListPageEmptyTerminal(t *testing.T) {
+	// A successful getmsg response can have no general_msg_list on its final page.
+	page, err := parseMsgListPage(&officialaccount.OfficialMsgListResp{MsgCount: 0, HasMore: 0, NextOffset: 10})
+	if err != nil {
+		t.Fatalf("empty terminal page failed: %v", err)
+	}
+	if page.More || len(page.Articles) != 0 {
+		t.Fatalf("unexpected terminal page: %+v", page)
+	}
+}
+
+func TestParseMsgListPageDoesNotAcceptMissingArticles(t *testing.T) {
+	for _, response := range []officialaccount.OfficialMsgListResp{
+		{MsgCount: 1, HasMore: 1, NextOffset: 10},
+		{MsgCount: 1, HasMore: 1, NextOffset: 10, MsgList: `{"list":[`},
+		{MsgCount: 1, HasMore: 0, NextOffset: 10, MsgList: `{"list":[]}`},
+	} {
+		if _, err := parseMsgListPage(&response); err == nil {
+			t.Fatalf("accepted incomplete article list: %+v", response)
+		}
+	}
+}
+
+func TestArchiveCompletesAfterOneArticleAndEmptyTerminal(t *testing.T) {
+	first := `{"list":[{"comm_msg_info":{"datetime":1700000000},"app_msg_ext_info":{"title":"第一篇","content_url":"https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=a"}}]}`
+	m := archive.New(t.TempDir(), func(_ string, offset int) (archive.Page, error) {
+		return fetchArchivePage(func(_ string, offset int) (*officialaccount.OfficialMsgListResp, error) {
+			switch offset {
+			case 0:
+				return &officialaccount.OfficialMsgListResp{MsgCount: 1, HasMore: 1, NextOffset: 10, MsgList: first}, nil
+			case 10:
+				return &officialaccount.OfficialMsgListResp{MsgCount: 0, HasMore: 0, NextOffset: 10}, nil
+			default:
+				return nil, errors.New("unexpected offset")
+			}
+		}, "x", offset)
+	})
+	defer m.Close()
+	if err := m.Start(archive.Options{Biz: "x", Mode: "all"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		scan := m.Get("x")
+		if scan.Status == "complete" {
+			if len(scan.Articles) != 1 || scan.Articles[0].Title != "第一篇" || scan.Pages != 2 {
+				t.Fatalf("unexpected scan result: %+v", scan)
+			}
+			return
+		}
+		if scan.Status == "error" {
+			t.Fatalf("scan failed: %+v", scan)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("scan did not complete: %+v", m.Get("x"))
+}
+
+func TestFetchArchivePageRetriesMalformedList(t *testing.T) {
+	calls := 0
+	page, err := fetchArchivePage(func(string, int) (*officialaccount.OfficialMsgListResp, error) {
+		calls++
+		if calls == 1 {
+			return &officialaccount.OfficialMsgListResp{MsgCount: 1, HasMore: 1, NextOffset: 10, MsgList: `{"list":[`}, nil
+		}
+		return &officialaccount.OfficialMsgListResp{MsgCount: 0, HasMore: 0, NextOffset: 10}, nil
+	}, "x", 10)
+	if err != nil || page.More || calls != 3 {
+		t.Fatalf("retry failed: page=%+v err=%v calls=%d", page, err, calls)
+	}
+}
+
+func TestFetchArchivePageRecoversFromTransientEmptyPage(t *testing.T) {
+	calls := 0
+	article := `{"list":[{"app_msg_ext_info":{"title":"下一篇","content_url":"https://mp.weixin.qq.com/s?__biz=x&mid=2&idx=1&sn=b"}}]}`
+	page, err := fetchArchivePage(func(string, int) (*officialaccount.OfficialMsgListResp, error) {
+		calls++
+		if calls == 1 {
+			return &officialaccount.OfficialMsgListResp{MsgCount: 0, HasMore: 0, NextOffset: 10}, nil
+		}
+		return &officialaccount.OfficialMsgListResp{MsgCount: 1, HasMore: 1, NextOffset: 20, MsgList: article}, nil
+	}, "x", 10)
+	if err != nil || !page.More || len(page.Articles) != 1 || page.Articles[0].Title != "下一篇" || calls != 2 {
+		t.Fatalf("transient empty page truncated the scan: page=%+v err=%v calls=%d", page, err, calls)
+	}
+}
+
+func TestFetchArchivePageRejectsUnconfirmedEmptyPage(t *testing.T) {
+	calls := 0
+	_, err := fetchArchivePage(func(string, int) (*officialaccount.OfficialMsgListResp, error) {
+		calls++
+		return &officialaccount.OfficialMsgListResp{MsgCount: 0, HasMore: 0, NextOffset: 10 + calls}, nil
+	}, "x", 10)
+	if err == nil || calls != 3 {
+		t.Fatalf("unconfirmed empty page was accepted: err=%v calls=%d", err, calls)
+	}
+}
 
 func summaryTask(t *testing.T, path, status string, created time.Time, labels map[string]string) *downloadpkg.Task {
 	t.Helper()

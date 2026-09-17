@@ -12,8 +12,10 @@ struct ArticlesView: View {
      if library.options.mode == "recent" {TextField("篇数",value:$library.options.limit,format:.number).frame(width:70);Text("篇").foregroundStyle(.secondary)}
      Spacer()
      if library.scan.status == "running" {Button("暂停读取"){Task{await library.pauseScan()}}}
-     else {
-      if ["paused","error"].contains(library.scan.status){Button("从断点继续"){Task{await library.startScan(resume:true)}}.help("沿用上次读取范围，从保存的页码继续").disabled(!backend.running || library.scanBusy)}
+     else if ["paused","error"].contains(library.scan.status) {
+      Button("重新读取"){Task{await library.startScan()}}.disabled(!backend.running || library.scanBusy || library.queueing)
+      Button("继续读取"){Task{await library.startScan(resume:true)}}.buttonStyle(.borderedProminent).help("从已保存的进度继续").disabled(!backend.running || library.scanBusy)
+     } else {
       Button(library.scan.articles.isEmpty ? "读取文章" : "重新读取"){Task{await library.startScan()}}.buttonStyle(.borderedProminent).disabled(!backend.running || library.scanBusy || library.queueing)
      }
     }
@@ -47,18 +49,19 @@ struct ArticlesView: View {
      Picker("下载速度",selection:$library.downloadMode){Text("安全").tag("safe");Text("快速").tag("fast")}.pickerStyle(.segmented).frame(width:170)
      Text(library.downloadModeDescription).font(.caption).foregroundStyle(library.downloadMode == "fast" ? Color.orange : Color.secondary)
     }
-    Text(library.selectedArticles.isEmpty ? "选择文章，或下载全部读取结果" : "已选择 \(library.selectedArticles.count) 篇").font(.callout).foregroundStyle(.secondary)
+    Text(library.selectedArticles.isEmpty ? (library.scan.status == "complete" ? "选择文章，或下载全部读取结果" : "选择文章，或先下载已读取的部分") : "已选择 \(library.selectedArticles.count) 篇").font(.callout).foregroundStyle(.secondary)
     Spacer()
     if library.queueing {ProgressView().controlSize(.small);Button("停止添加"){library.stopQueueing()}}
     else {
      Button("下载所选"){Task{await library.enqueue(selectedOnly:true)}}.disabled(library.selectedArticles.isEmpty || !backend.running)
-     Button("下载全部 \(library.scan.articles.count) 篇"){Task{await library.enqueue(selectedOnly:false)}}.buttonStyle(.borderedProminent).disabled(library.scan.articles.isEmpty || !backend.running || library.scan.status == "running")
+     Button(library.scan.status == "complete" ? "下载全部 \(library.scan.articles.count) 篇" : "下载已读取的 \(library.scan.articles.count) 篇"){Task{await library.enqueue(selectedOnly:false)}}.buttonStyle(.borderedProminent).disabled(library.scan.articles.isEmpty || !backend.running || library.scan.status == "running")
     }
    }.padding(16)}
   }.frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.top).navigationTitle(library.account?.nickname ?? "公众号")
  }
  private var headerDetail:String {
   if library.scan.articles.isEmpty {return library.savedAccountCount > 0 ? "尚未读取 · 本机已保存 \(library.savedAccountCount) 篇" : "尚未读取历史文章"}
-  return "本次读取 \(library.scan.articles.count) 篇" + (library.savedAccountCount > 0 ? " · 本机已保存 \(library.savedAccountCount) 篇" : "")
+  let progress = ["paused","error"].contains(library.scan.status) ? "已读取 \(library.scan.articles.count) 篇 · 可继续" : "本次读取 \(library.scan.articles.count) 篇"
+  return progress + (library.savedAccountCount > 0 ? " · 本机已保存 \(library.savedAccountCount) 篇" : "")
  }
 }
