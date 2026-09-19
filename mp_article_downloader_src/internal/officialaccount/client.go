@@ -76,6 +76,9 @@ func (acct *OfficialAccount) MergeFrom(source *OfficialAccount) {
 	if source.AvatarURL != "" {
 		acct.AvatarURL = source.AvatarURL
 	}
+	if source.AuthorId != "" {
+		acct.AuthorId = source.AuthorId
+	}
 	if source.Uin != "" {
 		acct.Uin = source.Uin
 	}
@@ -425,7 +428,7 @@ func (c *OfficialAccountClient) HandleFetchArticleList(ctx *gin.Context) {
 	if biz == "" {
 		result.ErrCode(ctx, result.CodeInvalidParams)
 	}
-	data, err := c.fetchArticleList(biz)
+	data, err := c.fetchArticleList(biz, ctx.Query("from_article_id"))
 	if err != nil {
 		code := result.CodeFetchMsgFailed
 		result.Err(ctx, code, "fetch article failed")
@@ -2189,6 +2192,11 @@ type ArticleListResponse struct {
 	MaxArticleID string `json:"max_article_id"`
 }
 
+type ArticleHistoryResponse struct {
+	Articles []Article `json:"articles"`
+	Pages    int       `json:"pages"`
+}
+
 func (c *OfficialAccountClient) fetchCookie(acct *OfficialAccount) error {
 	u := fmt.Sprintf("https://mp.weixin.qq.com/mp/author?action=show&__biz=%s&idx=1&scene=142&rscene=128&uin=%s&key=%s&devicetype=UnifiedPCMac&version=f2640619&lang=zh_CN&ascene=1&acctmode=0&pass_ticket=%s&countrycode=CN",
 		acct.Biz, acct.Uin, acct.Key, acct.PassTicket)
@@ -2222,7 +2230,7 @@ func (c *OfficialAccountClient) fetchCookie(acct *OfficialAccount) error {
 	return errors.New("no cookie found")
 }
 
-func (c *OfficialAccountClient) fetchArticleList(biz string) (*ArticleListResponse, error) {
+func (c *OfficialAccountClient) fetchArticleList(biz string, fromArticleID string) (*ArticleListResponse, error) {
 	// acct *OfficialAccount
 	var existing *OfficialAccount
 	acct_mu.RLock()
@@ -2241,12 +2249,26 @@ func (c *OfficialAccountClient) fetchArticleList(biz string) (*ArticleListRespon
 		}
 	}
 
-	u := fmt.Sprintf("https://mp.weixin.qq.com/mp/author?action=get_articles&author_id=%s&scene=142&limit=30&version=undefined&appmsg_token=%s&x5=0&f=json&user_article_role=0",
-		existing.AuthorId, existing.AppmsgToken)
-
-	req, err := http.NewRequest("GET", u, nil)
-	if err != nil {
-		return nil, err
+	if existing.AuthorId == "" {
+		return nil, errors.New("当前文章未提供作者历史标识，请重新打开文章")
+	}
+	buildURL := func() string {
+		u := url.URL{Scheme: "https", Host: "mp.weixin.qq.com", Path: "/mp/author"}
+		q := u.Query()
+		q.Set("action", "get_articles")
+		q.Set("author_id", existing.AuthorId)
+		q.Set("scene", "142")
+		q.Set("limit", "30")
+		q.Set("version", "undefined")
+		q.Set("appmsg_token", existing.AppmsgToken)
+		q.Set("x5", "0")
+		q.Set("f", "json")
+		q.Set("user_article_role", "0")
+		if fromArticleID != "" {
+			q.Set("from_article_id", fromArticleID)
+		}
+		u.RawQuery = q.Encode()
+		return u.String()
 	}
 	referer_params := url.Values{}
 	referer_params.Set("action", "show")
@@ -2266,38 +2288,106 @@ func (c *OfficialAccountClient) fetchArticleList(biz string) (*ArticleListRespon
 	referer_params.Set("countrycode", "CN")
 
 	referer := "https://mp.weixin.qq.com/mp/author?" + referer_params.Encode()
-	fmt.Println("fetch article list: cookie", existing.Cookie)
-	req.Header.Set("Cookie", existing.Cookie)
-	req.Header.Set("accept", "*/*")
-	req.Header.Set("accept-language", "zh-CN,zh;q=0.9")
-	req.Header.Set("priority", "u=1, i")
-	req.Header.Set("referer", referer)
-	req.Header.Set("sec-ch-ua", `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", `"macOS"`)
-	req.Header.Set("sec-fetch-dest", "empty")
-	req.Header.Set("sec-fetch-mode", "cors")
-	req.Header.Set("sec-fetch-site", "same-origin")
-	req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
-	req.Header.Set("x-requested-with", "XMLHttpRequest")
+	doRequest := func() (*ArticleListResponse, error) {
+		req, err := http.NewRequest("GET", buildURL(), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Cookie", existing.Cookie)
+		req.Header.Set("accept", "*/*")
+		req.Header.Set("accept-language", "zh-CN,zh;q=0.9")
+		req.Header.Set("priority", "u=1, i")
+		req.Header.Set("referer", referer)
+		req.Header.Set("sec-ch-ua", `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`)
+		req.Header.Set("sec-ch-ua-mobile", "?0")
+		req.Header.Set("sec-ch-ua-platform", `"macOS"`)
+		req.Header.Set("sec-fetch-dest", "empty")
+		req.Header.Set("sec-fetch-mode", "cors")
+		req.Header.Set("sec-fetch-site", "same-origin")
+		req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+		req.Header.Set("x-requested-with", "XMLHttpRequest")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("微信作者列表返回 HTTP %d", resp.StatusCode)
+		}
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		var data ArticleListResponse
+		if err := json.Unmarshal(bodyBytes, &data); err != nil {
+			return nil, err
+		}
+		return &data, nil
+	}
+
+	data, err := doRequest()
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body_bytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	if data.Ret == -3 || data.BaseResp.Ret == -3 {
+		if err := c.fetchCookie(existing); err != nil {
+			return nil, err
+		}
+		data, err = doRequest()
+		if err != nil {
+			return nil, err
+		}
 	}
-
-	var data ArticleListResponse
-	if err := json.Unmarshal(body_bytes, &data); err != nil {
-		return nil, err
+	if data.Ret != 0 {
+		return nil, fmt.Errorf("微信作者列表返回错误 %d: %s", data.Ret, data.ErrMsg)
 	}
+	if data.BaseResp.Ret != 0 {
+		return nil, fmt.Errorf("微信作者列表返回错误 %d", data.BaseResp.Ret)
+	}
+	return data, nil
+}
 
-	return &data, nil
+// FetchArticleHistory follows the current author-page cursor protocol. WeChat's
+// author page uses the last returned article mid as from_article_id; it does not
+// use the numeric offset from the legacy profile_ext endpoint.
+func (c *OfficialAccountClient) FetchArticleHistory(biz string) (*ArticleHistoryResponse, error) {
+	return collectArticleHistory(func(fromArticleID string) (*ArticleListResponse, error) {
+		return c.fetchArticleList(biz, fromArticleID)
+	}, 2000)
+}
+
+func collectArticleHistory(fetch func(string) (*ArticleListResponse, error), maxPages int) (*ArticleHistoryResponse, error) {
+	result := &ArticleHistoryResponse{Articles: []Article{}}
+	seen := map[string]bool{}
+	fromArticleID := ""
+	for page := 0; page < maxPages; page++ {
+		data, err := fetch(fromArticleID)
+		if err != nil {
+			return nil, err
+		}
+		result.Pages++
+		if len(data.Articles) == 0 {
+			return result, nil
+		}
+		for _, article := range data.Articles {
+			key := strings.TrimSpace(article.Mid)
+			if key == "" {
+				key = strings.TrimSpace(article.URL)
+			}
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			result.Articles = append(result.Articles, article)
+		}
+		next := strings.TrimSpace(data.Articles[len(data.Articles)-1].Mid)
+		if next == "" || next == fromArticleID {
+			return nil, errors.New("微信作者列表分页游标未继续前进")
+		}
+		fromArticleID = next
+	}
+	return nil, errors.New("微信作者列表页数超过安全上限")
 }
 
 func (c *OfficialAccountClient) fetchMsgList(logger zerolog.Logger, biz string, offset int) (*OfficialMsgListResp, error) {

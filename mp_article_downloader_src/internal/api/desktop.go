@@ -204,9 +204,50 @@ func fetchArchivePage(fetch func(string, int) (*officialaccount.OfficialMsgListR
 	return archive.Page{}, lastErr
 }
 
+func parseAuthorHistory(history *officialaccount.ArticleHistoryResponse) (archive.Page, error) {
+	if history == nil {
+		return archive.Page{}, fmt.Errorf("微信未返回作者文章列表")
+	}
+	page := archive.Page{ReadPages: history.Pages}
+	for _, article := range history.Articles {
+		u := archive.StableURL(article.URL)
+		if u == "" || strings.TrimSpace(article.Title) == "" {
+			continue
+		}
+		page.Articles = append(page.Articles, archive.Article{
+			ID:        archive.ID(u),
+			Title:     article.Title,
+			URL:       u,
+			Published: article.PublishTime,
+		})
+	}
+	return page, nil
+}
+
+func fetchDesktopArchivePage(
+	fetchLegacy func(string, int) (*officialaccount.OfficialMsgListResp, error),
+	fetchAuthor func(string) (*officialaccount.ArticleHistoryResponse, error),
+	biz string,
+	offset int,
+) (archive.Page, error) {
+	page, err := fetchArchivePage(fetchLegacy, biz, offset)
+	if err != nil || offset != 0 || page.More || len(page.Articles) != 0 {
+		return page, err
+	}
+	history, err := fetchAuthor(biz)
+	if err != nil {
+		return archive.Page{}, err
+	}
+	page, err = parseAuthorHistory(history)
+	if err == nil && len(page.Articles) == 0 {
+		err = fmt.Errorf("微信没有返回可归档的历史文章")
+	}
+	return page, err
+}
+
 func (c *APIClient) setupDesktop() {
 	c.archive = archive.New(filepath.Join(c.cfg.RootDir, "scans"), func(biz string, offset int) (archive.Page, error) {
-		page, err := fetchArchivePage(c.official.FetchMsgList, biz, offset)
+		page, err := fetchDesktopArchivePage(c.official.FetchMsgList, c.official.FetchArticleHistory, biz, offset)
 		if err != nil {
 			c.logger.Warn().Str("biz", biz).Int("offset", offset).Err(err).Msg("archive page failed")
 		}

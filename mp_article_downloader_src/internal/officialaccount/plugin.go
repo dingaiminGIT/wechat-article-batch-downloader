@@ -3,6 +3,7 @@ package officialaccount
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -12,9 +13,38 @@ import (
 
 var cspNonceReg = regexp.MustCompile(`'nonce-([^']+)'`)
 
+func rememberAuthorID(biz, authorID string) {
+	biz = strings.TrimSpace(biz)
+	authorID = strings.TrimSpace(authorID)
+	if biz == "" || authorID == "" {
+		return
+	}
+	changed := false
+	acct_mu.Lock()
+	if acct := accounts[biz]; acct != nil && acct.AuthorId != authorID {
+		acct.AuthorId = authorID
+		accounts[biz] = acct
+		changed = true
+	}
+	acct_mu.Unlock()
+	if changed {
+		save_accounts()
+	}
+}
+
 func CreateOfficialAccountInterceptorPlugin(cfg *OfficialAccountConfig, files *interceptor.ChannelInjectedFiles) *proxy.Plugin {
 	return &proxy.Plugin{
 		Match: "qq.com",
+		OnRequest: func(ctx proxy.Context) {
+			if ctx.Req().URL.Hostname() != "mp.weixin.qq.com" {
+				return
+			}
+			query, err := url.ParseQuery(ctx.Req().URL.RawQuery)
+			if err != nil {
+				return
+			}
+			rememberAuthorID(query.Get("__biz"), query.Get("author_id"))
+		},
 		OnResponse: func(ctx proxy.Context) {
 			resp_content_type := strings.ToLower(ctx.GetResponseHeader("Content-Type"))
 			hostname := ctx.Req().URL.Hostname()

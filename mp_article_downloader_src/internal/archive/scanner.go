@@ -40,9 +40,10 @@ type Scan struct {
 	Updated  int64     `json:"updated"`
 }
 type Page struct {
-	Articles []Article
-	More     bool
-	Next     int
+	Articles  []Article
+	More      bool
+	Next      int
+	ReadPages int
 }
 type Fetch func(string, int) (Page, error)
 type Manager struct {
@@ -200,7 +201,11 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 		default:
 		}
 		m.mu.Lock()
-		s.Pages++
+		pagesRead := p.ReadPages
+		if pagesRead < 1 {
+			pagesRead = 1
+		}
+		s.Pages += pagesRead
 		for _, a := range p.Articles {
 			if a.ID == "" {
 				a.ID = ID(a.URL)

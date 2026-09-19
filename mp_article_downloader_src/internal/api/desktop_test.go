@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,66 @@ func TestParseMsgListPageDoesNotAcceptMissingArticles(t *testing.T) {
 		if _, err := parseMsgListPage(&response); err == nil {
 			t.Fatalf("accepted incomplete article list: %+v", response)
 		}
+	}
+}
+
+func TestParseAuthorHistoryProducesArchivePage(t *testing.T) {
+	page, err := parseAuthorHistory(&officialaccount.ArticleHistoryResponse{
+		Pages: 2,
+		Articles: []officialaccount.Article{
+			{Mid: "1", Title: "第一篇", URL: "https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=a&key=secret", PublishTime: 1700000000},
+			{Mid: "2", Title: "无效地址", URL: "https://example.com/article"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.ReadPages != 2 || len(page.Articles) != 1 || page.Articles[0].Published != 1700000000 {
+		t.Fatalf("unexpected page: %+v", page)
+	}
+	if strings.Contains(page.Articles[0].URL, "key=") {
+		t.Fatalf("credential leaked into stable URL: %s", page.Articles[0].URL)
+	}
+}
+
+func TestDesktopArchiveFallsBackToAuthorCursorHistory(t *testing.T) {
+	legacyCalls := 0
+	authorCalls := 0
+	page, err := fetchDesktopArchivePage(
+		func(string, int) (*officialaccount.OfficialMsgListResp, error) {
+			legacyCalls++
+			return &officialaccount.OfficialMsgListResp{}, nil
+		},
+		func(string) (*officialaccount.ArticleHistoryResponse, error) {
+			authorCalls++
+			return &officialaccount.ArticleHistoryResponse{Pages: 2, Articles: []officialaccount.Article{{
+				Mid: "1", Title: "来自作者列表", URL: "https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=a",
+			}}}, nil
+		},
+		"x",
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyCalls != 2 || authorCalls != 1 || page.ReadPages != 2 || len(page.Articles) != 1 {
+		t.Fatalf("fallback failed: page=%+v legacy=%d author=%d", page, legacyCalls, authorCalls)
+	}
+}
+
+func TestDesktopArchiveDoesNotAcceptTwoEmptySources(t *testing.T) {
+	_, err := fetchDesktopArchivePage(
+		func(string, int) (*officialaccount.OfficialMsgListResp, error) {
+			return &officialaccount.OfficialMsgListResp{}, nil
+		},
+		func(string) (*officialaccount.ArticleHistoryResponse, error) {
+			return &officialaccount.ArticleHistoryResponse{Pages: 1}, nil
+		},
+		"x",
+		0,
+	)
+	if err == nil {
+		t.Fatal("accepted empty legacy and author histories as complete")
 	}
 }
 

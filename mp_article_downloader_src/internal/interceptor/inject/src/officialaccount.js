@@ -579,6 +579,48 @@
     });
     return articles;
   }
+  async function fetch_author_articles(acct, maxPages, onProgress) {
+    if (!acct || !acct.biz || !acct.author_id) return [];
+    var all = [];
+    var seen = {};
+    var cursor = "";
+    var completed = false;
+    var pagesRead = 0;
+    for (var page = 0; page < maxPages; page += 1) {
+      onProgress(`旧版历史接口未返回文章，正在通过作者列表读取第 ${page + 1} 页`);
+      var url = `${get_api_origin()}/api/mp/article/list?biz=${encodeURIComponent(acct.biz)}`;
+      if (cursor) url += `&from_article_id=${encodeURIComponent(cursor)}`;
+      var [err, data] = await WXU.request({ method: "GET", url });
+      if (err) throw err;
+      var items = Array.isArray(data && data.articles) ? data.articles : [];
+      pagesRead += 1;
+      if (items.length === 0) {
+        completed = true;
+        break;
+      }
+      items.forEach(function (item) {
+        var articleURL = normalize_article_url(item.url || "");
+        var key = String(item.mid || "") || article_url_key(articleURL);
+        if (!articleURL || !item.title || seen[key]) return;
+        seen[key] = true;
+        all.push({
+          title: item.title,
+          url: articleURL,
+          publishTime: item.publish_time || "",
+          source: "author-history",
+        });
+      });
+      var nextCursor = String(items[items.length - 1].mid || "");
+      if (!nextCursor || nextCursor === cursor) {
+        throw new Error("微信作者列表没有返回下一页游标");
+      }
+      cursor = nextCursor;
+    }
+    all.pagesRead = pagesRead;
+    all.completed = completed;
+    all.hitLimit = !completed;
+    return all;
+  }
   async function fetch_mp_articles(acct, maxPages, onProgress) {
     var all = [];
     var offset = 0;
@@ -622,6 +664,16 @@
         break;
       }
       offset = nextOffset;
+    }
+    if (all.length === 0) {
+      try {
+        var authorArticles = await fetch_author_articles(acct, maxPages, onProgress);
+        if (authorArticles.length > 0) {
+          return append_current_article(authorArticles);
+        }
+      } catch (authorError) {
+        apiError = authorError;
+      }
     }
     if (all.length === 0) {
       var visible = scan_visible_articles();
@@ -896,6 +948,13 @@
       refresh_uri: biz && mid && idx && sn ? `https://mp.weixin.qq.com/s?__biz=${biz}&mid=${mid}&idx=${idx}&sn=${sn}` : location.href,
       pass_ticket: window.pass_ticket,
       appmsg_token: window.appmsg_token,
+      author_id:
+        window.cgiData?.authorId ||
+        window.cgiData?.author_id ||
+        window.cgiDataNew?.authorId ||
+        window.cgiDataNew?.author_id ||
+        window.cgiDataNew?.user_name ||
+        "",
       cookie: document.cookie || "",
       cookie_expiration: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
     };
