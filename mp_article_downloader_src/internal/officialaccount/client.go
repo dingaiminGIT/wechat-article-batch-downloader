@@ -49,6 +49,7 @@ type OfficialAccount struct {
 	Nickname         string `json:"nickname"`
 	AvatarURL        string `json:"avatar_url"`
 	AuthorId         string `json:"author_id"`
+	Username         string `json:"username,omitempty"`
 	Uin              string `json:"uin"`
 	Key              string `json:"key"`
 	PassTicket       string `json:"pass_ticket"`

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,8 +13,10 @@ import (
 	"time"
 
 	downloadpkg "github.com/GopeedLab/gopeed/pkg/download"
+	officialdownload "github.com/GopeedLab/gopeed/pkg/officialaccount"
 	"github.com/gin-gonic/gin"
 	"mp_article_batch_downloader/internal/archive"
+	"mp_article_batch_downloader/internal/nativebridge"
 	"mp_article_batch_downloader/internal/officialaccount"
 	result "mp_article_batch_downloader/internal/util"
 )
@@ -27,13 +30,14 @@ type downloadBatchSummary struct {
 	Queued     int    `json:"queued"`
 	Failed     int    `json:"failed"`
 	Paused     int    `json:"paused"`
+	Canceled   int    `json:"canceled"`
 	Missing    int    `json:"missing"`
 	StartedAt  int64  `json:"started_at"`
 	FinishedAt int64  `json:"finished_at"`
 	Mode       string `json:"mode,omitempty"`
 }
 
-func summarizeDownloadBatches(tasks []*downloadpkg.Task, taskErrors map[string]string) []downloadBatchSummary {
+func summarizeDownloadBatches(tasks []*downloadpkg.Task, taskErrors map[string]string, includeAll ...bool) []downloadBatchSummary {
 	type batchKey struct{ path, id string }
 	groups := map[batchKey]*downloadBatchSummary{}
 	counts := map[batchKey]int{}
@@ -78,6 +82,8 @@ func summarizeDownloadBatches(tasks []*downloadpkg.Task, taskErrors map[string]s
 			summary.FinishedAt = updated
 		}
 		switch string(task.Status) {
+		case "canceled":
+			summary.Canceled++
 		case "done":
 			if exists, _ := taskOutputFilesExist(task); exists {
 				summary.Completed++
@@ -110,8 +116,18 @@ func summarizeDownloadBatches(tasks []*downloadpkg.Task, taskErrors map[string]s
 		}
 	}
 	result := make([]downloadBatchSummary, 0, len(latest))
-	for _, summary := range latest {
-		if summary.Running+summary.Queued > 0 {
+	selected := make([]*downloadBatchSummary, 0, len(groups))
+	if len(includeAll) > 0 && includeAll[0] {
+		for _, s := range groups {
+			selected = append(selected, s)
+		}
+	} else {
+		for _, s := range latest {
+			selected = append(selected, s)
+		}
+	}
+	for _, summary := range selected {
+		if summary.Running+summary.Queued+summary.Paused > 0 {
 			summary.FinishedAt = 0
 		}
 		result = append(result, *summary)
@@ -246,14 +262,53 @@ func fetchDesktopArchivePage(
 }
 
 func (c *APIClient) setupDesktop() {
-	c.archive = archive.New(filepath.Join(c.cfg.RootDir, "scans"), func(biz string, offset int) (archive.Page, error) {
-		page, err := fetchDesktopArchivePage(c.official.FetchMsgList, c.official.FetchArticleHistory, biz, offset)
-		if err != nil {
-			c.logger.Warn().Str("biz", biz).Int("offset", offset).Err(err).Msg("archive page failed")
+	c.native = nativebridge.New(c.cfg.RootDir)
+	officialdownload.NativeHTMLProvider = func(rawURL string) ([]byte, bool, error) {
+		body, err := c.native.HTML(rawURL)
+		return body, true, err
+	}
+	c.archive = archive.NewWithCursor(filepath.Join(c.cfg.RootDir, "scans"), func(s archive.Scan) (archive.Page, error) {
+		if s.Source != "native" && (s.Offset > 0 || s.Pages > 0) {
+			return archive.Page{}, archive.UserError("旧版断点不能直接转换为原生游标，请点击重新读取；已下载文件会保留。")
 		}
-		return page, err
+		p, err := c.native.Fetch(s.Options.Biz, c.official.NativeUsername(s.Options.Biz), s.Cursor, s.Profile)
+		if err != nil {
+			return archive.Page{}, archive.UserError(err.Error())
+		}
+		return nativeArchivePage(p, s.Offset)
+	})
+	remember := func(s nativebridge.Status) {
+		for _, a := range s.Accounts {
+			c.official.RememberNativeAccount(a.Biz, a.Username, a.Nickname)
+		}
+	}
+	c.engine.GET("/api/desktop/native/status", nativeLocalOnly, func(ctx *gin.Context) {
+		s, e := c.native.Status()
+		if e != nil {
+			result.Ok(ctx, nativebridge.Status{State: "error", Message: e.Error(), Accounts: []nativebridge.Account{}})
+			return
+		}
+		remember(s)
+		result.Ok(ctx, s)
+	})
+	c.engine.POST("/api/desktop/native/connect", nativeLocalOnly, func(ctx *gin.Context) {
+		s, e := c.native.Connect()
+		if e != nil {
+			result.Err(ctx, 400, e.Error())
+			return
+		}
+		remember(s)
+		result.Ok(ctx, s)
+	})
+	c.engine.POST("/api/desktop/native/disconnect", nativeLocalOnly, func(ctx *gin.Context) {
+		c.archive.Close()
+		_ = c.downloader.Pause(&downloadpkg.TaskFilter{})
+		c.native.Close()
+		result.Ok(ctx, nil)
 	})
 	c.engine.POST("/api/desktop/queue", func(ctx *gin.Context) {
+		c.batchControlMu.Lock()
+		defer c.batchControlMu.Unlock()
 		var items []DownloadTaskPayload
 		if ctx.ShouldBindJSON(&items) != nil || len(items) > 50 {
 			result.Err(ctx, 400, "每批最多 50 篇文章")
@@ -261,6 +316,20 @@ func (c *APIClient) setupDesktop() {
 		}
 		created, skipped, failed := 0, 0, 0
 		for _, item := range items {
+			// A later chunk must not restart a batch paused/stopped while submitting.
+			blocked := false
+			if id := item.Extra["batch_id"]; id != "" {
+				for _, task := range c.downloader.GetTasks() {
+					if task.Meta != nil && task.Meta.Req != nil && task.Meta.Req.Labels["batch_id"] == id && (string(task.Status) == "pause" || string(task.Status) == "canceled") {
+						blocked = true
+						break
+					}
+				}
+			}
+			if blocked {
+				result.Err(ctx, 409, "此批次已暂停或终止，未继续添加任务")
+				return
+			}
 			_, err := c.createDownloadTask(item)
 			if err == nil {
 				created++
@@ -272,6 +341,7 @@ func (c *APIClient) setupDesktop() {
 		}
 		result.Ok(ctx, gin.H{"created": created, "skipped": skipped, "failed": failed})
 	})
+	c.engine.POST("/api/desktop/batch-control", nativeLocalOnly, c.handleBatchControl)
 	c.engine.GET("/api/desktop/info", func(ctx *gin.Context) {
 		result.Ok(ctx, gin.H{"app": "mp-archive-desktop", "version": 1, "download_dir": c.cfg.DownloadDir})
 	})
@@ -282,10 +352,10 @@ func (c *APIClient) setupDesktop() {
 			taskErrors[id] = message
 		}
 		c.taskErrorMu.Unlock()
-		result.Ok(ctx, summarizeDownloadBatches(c.downloader.GetTasks(), taskErrors))
+		result.Ok(ctx, summarizeDownloadBatches(c.downloader.GetTasks(), taskErrors, ctx.Query("all") == "1"))
 	})
 	c.engine.GET("/api/desktop/scan", func(ctx *gin.Context) { result.Ok(ctx, c.archive.Get(ctx.Query("biz"))) })
-	c.engine.POST("/api/desktop/scan", func(ctx *gin.Context) {
+	c.engine.POST("/api/desktop/scan", nativeLocalOnly, func(ctx *gin.Context) {
 		var o archive.Options
 		if ctx.ShouldBindJSON(&o) != nil {
 			result.Err(ctx, 400, "参数无效")
@@ -306,6 +376,33 @@ func (c *APIClient) setupDesktop() {
 		c.archive.Pause(o.Biz)
 		result.Ok(ctx, nil)
 	})
+}
+
+func nativeArchivePage(p nativebridge.Page, offset int) (archive.Page, error) {
+	if p.IsEnd == nil || (*p.IsEnd != 0 && *p.IsEnd != 1) || p.Profile == "" {
+		return archive.Page{}, archive.UserError("原生分页状态不完整，已暂停")
+	}
+	page := archive.Page{More: *p.IsEnd == 0, Next: offset + 1, NextCursor: p.NextCursor, Profile: p.Profile, Source: "native"}
+	for _, a := range p.Articles {
+		u := archive.StableURL(a.URL)
+		if u == "" || a.Title == "" {
+			continue
+		}
+		page.Articles = append(page.Articles, archive.Article{ID: archive.ArticleID(u), Title: a.Title, URL: u, Digest: a.Digest, Published: a.Published})
+	}
+	if offset == 0 && len(page.Articles) == 0 {
+		return archive.Page{}, archive.UserError("首屏没有可归档文章，不能确认历史为空")
+	}
+	return page, nil
+}
+
+func nativeLocalOnly(ctx *gin.Context) {
+	host, _, err := net.SplitHostPort(ctx.Request.RemoteAddr)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || ctx.GetHeader("Origin") != "" {
+		ctx.AbortWithStatus(403)
+		return
+	}
+	ctx.Next()
 }
 
 func (c *APIClient) loadTaskErrors() {
@@ -341,7 +438,7 @@ func (c *APIClient) pauseFastBatchOnVerification(evt *downloadpkg.Event) {
 	if batchID == "" {
 		return
 	}
-	// Pause the rest of this fast batch after the first verification response.
+	// Pause either speed mode after verification or native disconnect.
 	// Running exporters may still finish or fail, but queued articles are kept
 	// for a later safe-mode retry instead of producing hundreds of failures.
 	go func() {
@@ -366,7 +463,7 @@ func fastBatchVerificationID(evt *downloadpkg.Event) string {
 	}
 	labels := evt.Task.Meta.Req.Labels
 	message := evt.Err.Error()
-	if labels["download_mode"] != "fast" || (!strings.Contains(message, "访问验证") && !strings.Contains(message, "凭证已失效")) {
+	if !strings.Contains(message, "访问验证") && !strings.Contains(message, "凭证已失效") && !strings.Contains(message, "原生") && !strings.Contains(message, "微信会话") && !strings.Contains(message, "微信正文") {
 		return ""
 	}
 	return labels["batch_id"]

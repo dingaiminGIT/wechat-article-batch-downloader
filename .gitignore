@@ -13,3 +13,6 @@ macos/.build/
 macos/.swiftpm/
 dist/
 release/
+
+# Local device validation contains personal article/output metadata.
+/verification/下载功能实测-*.json

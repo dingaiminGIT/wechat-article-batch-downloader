@@ -568,6 +568,10 @@ func (c *APIClient) createDownloadTask(body DownloadTaskPayload) (string, error)
 		if t == nil || t.Meta == nil || t.Meta.Req == nil || t.Meta.Opts == nil {
 			continue
 		}
+		// A stopped batch is history, not an active duplicate. Keep any files.
+		if t.Status == downloadpkg.ArticleCanceled {
+			continue
+		}
 		sameTarget := filepath.Clean(t.Meta.Opts.Path) == filepath.Clean(taskPath) && t.Meta.Opts.Name == taskName
 		// For officialaccount URLs, compare by article_id label
 		if articleID != "" && t.Meta.Req.Labels != nil && t.Meta.Req.Labels["article_id"] == articleID {

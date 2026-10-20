@@ -1,0 +1,7 @@
+{
+  "architecture": "arm64",
+  "wechat_version": "4.1.13",
+  "wmpf_build": "269602",
+  "framework_sha256": "c87a1e41727f063e4db1402ecdf75aabf6282aaf980e4e8a04fad4c4d67b8a8d",
+  "prepared_helper_sha256": "2cdbc7574f2961bfeaffcfc7e9c5899cf48dc0f36fa14d8953e544d832f7d761"
+}

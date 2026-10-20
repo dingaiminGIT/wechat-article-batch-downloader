@@ -35,6 +35,10 @@ type ArticleAuthCredential struct {
 
 var ArticleAuthProvider func(biz string) ArticleAuthCredential
 
+// NativeHTMLProvider is optional; the desktop adapter uses the current WeChat
+// article context without exporting account cookies or keys.
+var NativeHTMLProvider func(rawURL string) ([]byte, bool, error)
+
 // WeChat starts returning an interactive verification page when article HTML is
 // requested too quickly. Serialize article page requests and keep a small gap;
 // images are downloaded separately and are not subject to this gate.
@@ -1017,6 +1021,12 @@ func (c *OfficialAccountDownload) FetchArticle(url string) (*WechatOfficialArtic
 }
 
 func (c *OfficialAccountDownload) Scrape(rawURL string) ([]byte, error) {
+	if NativeHTMLProvider != nil {
+		waitForArticleRequestSlot(nativeArticleRequestInterval(c.ArticleRequestInterval))
+		if body, used, err := NativeHTMLProvider(rawURL); used {
+			return body, err
+		}
+	}
 	interval := c.ArticleRequestInterval
 	maxAttempts := 1
 	if interval > 0 && interval < safeArticleRequestInterval {
@@ -1041,6 +1051,15 @@ func (c *OfficialAccountDownload) Scrape(rawURL string) ([]byte, error) {
 		}
 	}
 	return nil, lastErr
+}
+
+// Native fast mode is deliberately capped at one request per second. It does
+// not inherit the old HTTP adapter's 500 ms interval or automatic retries.
+func nativeArticleRequestInterval(requested time.Duration) time.Duration {
+	if requested > 0 && requested <= FastArticleRequestInterval {
+		return time.Second
+	}
+	return 2 * time.Second
 }
 
 func (c *OfficialAccountDownload) scrapeOnce(rawURL string, interval time.Duration) ([]byte, error) {

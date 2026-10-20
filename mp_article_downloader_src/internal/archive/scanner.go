@@ -31,28 +31,50 @@ type Options struct {
 	Resume bool   `json:"resume"`
 }
 type Scan struct {
-	Options  Options   `json:"options"`
-	Status   string    `json:"status"`
-	Message  string    `json:"message"`
-	Offset   int       `json:"offset"`
-	Pages    int       `json:"pages"`
-	Articles []Article `json:"articles"`
-	Updated  int64     `json:"updated"`
+	Options       Options   `json:"options"`
+	Status        string    `json:"status"`
+	Message       string    `json:"message"`
+	Offset        int       `json:"offset"`
+	Pages         int       `json:"pages"`
+	Articles      []Article `json:"articles"`
+	Updated       int64     `json:"updated"`
+	Cursor        string    `json:"cursor,omitempty"`
+	Profile       string    `json:"profile,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	CursorHistory []string  `json:"cursor_history,omitempty"`
 }
 type Page struct {
-	Articles  []Article
-	More      bool
-	Next      int
-	ReadPages int
+	Articles   []Article
+	More       bool
+	Next       int
+	ReadPages  int
+	NextCursor string
+	Profile    string
+	Source     string
 }
 type Fetch func(string, int) (Page, error)
+type CursorFetch func(Scan) (Page, error)
+
+// UserError is a deliberately user-facing explanation, never a raw network error.
+type UserError string
+
+func (e UserError) Error() string { return string(e) }
+
 type Manager struct {
-	mu    sync.Mutex
-	scans map[string]*Scan
-	stops map[string]chan struct{}
-	dir   string
-	fetch Fetch
-	delay time.Duration
+	mu          sync.Mutex
+	scans       map[string]*Scan
+	stops       map[string]chan struct{}
+	dir         string
+	fetch       Fetch
+	cursorFetch CursorFetch
+	delay       time.Duration
+}
+
+func NewWithCursor(dir string, fetch CursorFetch) *Manager {
+	m := New(dir, nil)
+	m.cursorFetch = fetch
+	m.delay = 1500 * time.Millisecond
+	return m
 }
 
 func New(dir string, fetch Fetch) *Manager {
@@ -102,6 +124,7 @@ func (m *Manager) Get(biz string) Scan {
 	}
 	copy := *s
 	copy.Articles = append([]Article{}, s.Articles...)
+	copy.CursorHistory = append([]string{}, s.CursorHistory...)
 	return copy
 }
 func (m *Manager) Start(o Options) error {
@@ -179,6 +202,10 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 		_ = m.save(s)
 	}
 	seen := map[string]bool{}
+	visited := map[string]bool{}
+	for _, cursor := range s.CursorHistory {
+		visited[cursor] = true
+	}
 	for _, a := range s.Articles {
 		seen[a.ID] = true
 	}
@@ -189,9 +216,20 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 			return
 		default:
 		}
-		p, err := m.fetch(s.Options.Biz, s.Offset)
+		var p Page
+		var err error
+		if m.cursorFetch != nil {
+			snapshot := m.Get(s.Options.Biz)
+			p, err = m.cursorFetch(snapshot)
+		} else {
+			p, err = m.fetch(s.Options.Biz, s.Offset)
+		}
 		if err != nil {
-			finish("paused", fmt.Sprintf("已保存 %d 篇文章和读取进度。微信暂时没有返回完整列表，请在微信重新打开文章后继续读取。", len(s.Articles)))
+			message := fmt.Sprintf("已保存 %d 篇文章和读取进度。微信暂时没有返回完整列表，请在微信重新打开文章后继续读取。", len(s.Articles))
+			if friendly, ok := err.(UserError); ok {
+				message = fmt.Sprintf("已保存 %d 篇。%s", len(s.Articles), friendly)
+			}
+			finish("paused", message)
 			return
 		}
 		select {
@@ -206,6 +244,7 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 			pagesRead = 1
 		}
 		s.Pages += pagesRead
+		newOnPage := 0
 		for _, a := range p.Articles {
 			if a.ID == "" {
 				a.ID = ID(a.URL)
@@ -214,6 +253,7 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 				continue
 			}
 			seen[a.ID] = true
+			newOnPage++
 			if s.Options.Mode == "date" && (a.Published < s.Options.After || a.Published > s.Options.Before) {
 				continue
 			}
@@ -224,8 +264,21 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 		}
 		done := !p.More || s.Options.Mode == "recent" && len(s.Articles) >= s.Options.Limit
 		badOffset := p.More && p.Next <= s.Offset
+		if p.Source == "native" {
+			badOffset = p.More && (p.NextCursor == "" || p.NextCursor == s.Cursor || visited[ID(p.NextCursor)] || newOnPage == 0)
+		}
 		if !badOffset {
 			s.Offset = p.Next
+			if p.Source != "" {
+				s.Source = p.Source
+				s.Cursor = p.NextCursor
+				s.Profile = p.Profile
+				if p.NextCursor != "" {
+					h := ID(p.NextCursor)
+					visited[h] = true
+					s.CursorHistory = append(s.CursorHistory, h)
+				}
+			}
 		}
 		s.Message = fmt.Sprintf("已读取 %d 页，找到 %d 篇文章", s.Pages, len(s.Articles))
 		err = m.save(s)
@@ -251,6 +304,17 @@ func (m *Manager) run(s *Scan, stop chan struct{}) {
 	}
 }
 func ID(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:])[:16] }
+func ArticleID(raw string) string {
+	u, err := url.Parse(StableURL(raw))
+	if err != nil {
+		return ID(raw)
+	}
+	q := u.Query()
+	if q.Get("__biz") != "" && q.Get("mid") != "" && q.Get("idx") != "" {
+		return ID(q.Get("__biz") + ":" + q.Get("mid") + ":" + q.Get("idx"))
+	}
+	return ID(u.String())
+}
 func StableURL(raw string) string {
 	u, e := url.Parse(html.UnescapeString(raw))
 	if e != nil {

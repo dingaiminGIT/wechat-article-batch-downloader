@@ -140,7 +140,7 @@ func (d *Downloader) Setup() error {
 			}
 			d.assignFetcherManager(task)
 			initTask(task)
-			if task.Status != base.DownloadStatusDone && task.Status != base.DownloadStatusError {
+			if task.Status != base.DownloadStatusDone && task.Status != base.DownloadStatusError && task.Status != ArticleCanceled {
 				task.Status = base.DownloadStatusPause
 			}
 		}
@@ -360,7 +360,7 @@ func (d *Downloader) Pause(filter *TaskFilter) (err error) {
 		return d.pauseAll()
 	}
 
-	filter.NotStatuses = []base.Status{base.DownloadStatusPause, base.DownloadStatusError, base.DownloadStatusDone}
+	filter.NotStatuses = []base.Status{base.DownloadStatusPause, base.DownloadStatusError, base.DownloadStatusDone, ArticleCanceled}
 	pauseTasks := d.GetTasksByFilter(filter)
 	if len(pauseTasks) == 0 {
 		return ErrTaskNotFound
@@ -400,7 +400,7 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 		return d.continueAll()
 	}
 
-	filter.NotStatuses = []base.Status{base.DownloadStatusRunning, base.DownloadStatusDone}
+	filter.NotStatuses = []base.Status{base.DownloadStatusRunning, base.DownloadStatusDone, ArticleCanceled}
 	continueTasks := d.GetTasksByFilter(filter)
 	if len(continueTasks) == 0 {
 		return ErrTaskNotFound
@@ -461,7 +461,7 @@ func (d *Downloader) continueAll() (err error) {
 		// calculate how many tasks can be continued, can't exceed maxRunning
 		remainCount := d.remainRunningCount()
 		for _, task := range d.tasks {
-			if task.Status != base.DownloadStatusRunning && task.Status != base.DownloadStatusDone {
+			if task.Status != base.DownloadStatusRunning && task.Status != base.DownloadStatusDone && task.Status != ArticleCanceled {
 				if len(continuedTasks) < remainCount {
 					continuedTasks = append(continuedTasks, task)
 				} else {
@@ -967,7 +967,7 @@ func (d *Downloader) statusMut(task *Task, fn func() (bool, error)) (bool, error
 func (d *Downloader) doStart(task *Task) (err error) {
 	var isCreate bool
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
-		if task.Status == base.DownloadStatusRunning || task.Status == base.DownloadStatusDone {
+		if task.Status == base.DownloadStatusRunning || task.Status == base.DownloadStatusDone || task.Status == ArticleCanceled {
 			isReturn = true
 			return
 		}
@@ -1057,7 +1057,7 @@ func (d *Downloader) doStart(task *Task) (err error) {
 
 func (d *Downloader) doPause(task *Task) (err error) {
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
-		if task.Status == base.DownloadStatusPause || task.Status == base.DownloadStatusDone {
+		if task.Status == base.DownloadStatusPause || task.Status == base.DownloadStatusDone || task.Status == ArticleCanceled {
 			isReturn = true
 			return
 		}

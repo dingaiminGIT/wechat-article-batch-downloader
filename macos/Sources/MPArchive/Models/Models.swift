@@ -32,6 +32,8 @@ struct Scan: Decodable {
  var pages: Int
  var articles: [Article]
  var updated: Int64
+ var source: String? = nil
+ var requiresRestart: Bool {source != "native" && (offset > 0 || pages > 0)}
  static let empty = Scan(options: nil, status: "idle", message: "选择范围，读取公众号历史文章", offset: 0, pages: 0, articles: [], updated: 0)
 }
 struct DownloadItem: Codable, Identifiable {
@@ -79,6 +81,10 @@ struct DownloadBatchProgress: Decodable, Hashable {
  let started_at: Int64
  let finished_at: Int64
  let mode: String?
+ var canceled: Int? = nil
+ var canceledCount:Int {canceled ?? 0}
+ var canResume:Bool {canceledCount == 0 && (paused > 0 || failed > 0)}
+ var canStop:Bool {running + queued + paused + failed > 0 && canceledCount == 0}
  var activeCount: Int {running + queued}
  var isActive: Bool {activeCount > 0}
  var started: Date? {started_at > 0 ? Date(timeIntervalSince1970:Double(started_at)/1000) : nil}
@@ -135,6 +141,7 @@ struct DownloadFolder: Identifiable, Hashable {
   if progress.queued > 0 {parts.append("排队 \(progress.queued)")}
   if progress.failed > 0 {parts.append("失败 \(progress.failed)")}
   if progress.paused > 0 {parts.append("暂停 \(progress.paused)")}
+  if progress.canceledCount > 0 {parts.append(progress.running > 0 ? "终止中 · 当前文章完成后停止" : "已终止 \(progress.canceledCount) 篇")}
   if progress.missing > 0 {parts.append("文件缺失 \(progress.missing)")}
   if parts.isEmpty && completedCount >= progress.total {parts.append("已完成")}
   return parts.joined(separator:" · ")
@@ -147,6 +154,47 @@ struct DownloadFolder: Identifiable, Hashable {
  }
 }
 struct DesktopInfo: Decodable {let app: String;let download_dir: String}
+struct NativeConnection: Decodable {
+ var ready: Bool
+ var state: String
+ var message: String
+ var accounts: [NativeAccount]? = nil
+ var article_ready: Bool? = nil
+ var canDownload: Bool {ready && article_ready == true}
+ var channelConnected: Bool {ready || state == "waiting_profile"}
+ var needsReconnect: Bool {["stopped","disconnected","error"].contains(state)}
+ var title: String {
+  if ready {return (accounts ?? []).isEmpty ? "微信已连接 · 等待公众号" : "微信通道已连接 · 本次识别 \((accounts ?? []).count) 个公众号"}
+  switch state {
+  case "waiting_miniapp": return "下一步：打开小程序首页"
+  case "waiting_profile": return "下一步：打开公众号主页"
+  case "disconnected": return "微信连接已失效"
+  case "error": return "连接未完成"
+  default: return "先连接微信"
+  }
+ }
+ var guidance: String {
+  if ready {return canDownload ? "读取只获取文章列表，不会自动下载。点击「开始下载」后才保存正文与图片。" : "请在微信打开目标公众号的一篇文章正文，并保持窗口不关；公众号主页不能代替正文。"}
+  if state == "waiting_miniapp" {return "微信 → 发现 → 小程序 → 腾讯文档。停在首页即可；若已经打开，请关闭小程序后重开，不用打开文档。"}
+  if state == "waiting_profile" {return "小程序已连接。打开目标公众号的一篇正文，再点击文章里的公众号名称。"}
+  if state == "stopped" {return "先点击「连接微信」，再打开腾讯文档小程序首页。无需公众号管理权限。"}
+  return message
+ }
+ static let stopped = NativeConnection(ready:false,state:"stopped",message:"先连接微信，再打开小程序首页")
+}
+struct NativeAccount: Decodable {let biz: String;let username: String;let nickname: String}
+struct ActionNotice: Identifiable {let id = UUID();let title: String;let message: String}
+struct DownloadDraft:Identifiable {
+ let id = UUID()
+ let account:Account
+ let articles:[Article]
+}
+enum DownloadMode: String, CaseIterable, Identifiable {
+ case safe, fast
+ var id: String {rawValue}
+ var title: String {self == .safe ? "稳妥 · 推荐" : "快速 · 试验"}
+ var detail: String {self == .safe ? "正文请求间隔至少 2 秒；已有文件跳过。" : "正文请求间隔至少 1 秒，不保证总耗时减半；可能更易遇到微信验证。"}
+}
 struct ArticleProbe: Decodable {let title: String;let mode: String}
 struct Empty: Decodable {}
 struct APIError: LocalizedError {let code: Int;let message: String;var errorDescription: String? {message}}

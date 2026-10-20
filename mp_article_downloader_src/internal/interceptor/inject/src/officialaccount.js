@@ -715,113 +715,8 @@
     }
     return { ...(data || {}), filename };
   }
-  function render_batch_panel(acct) {
-    if (!acct) return;
-    if (document.querySelector("#__mp_article_batch_panel__")) return;
-    var defaultSubdir = safe_filename(acct.nickname || "公众号文章");
-    var panel = document.createElement("div");
-    panel.id = "__mp_article_batch_panel__";
-    panel.innerHTML = `
-      <div class="mp-batch-title">
-        <span>网页内批量下载（备用）</span>
-        <button data-action="hide" title="隐藏">隐藏</button>
-      </div>
-      <div class="mp-batch-account">${escape_html(acct.nickname || "当前公众号")}<br>${escape_html(acct.biz || "未识别 biz，将尝试读取当前页可见文章")}</div>
-      <div class="mp-batch-row single">
-        <input data-role="subdir" type="text" value="${escape_html(defaultSubdir)}" title="保存子目录">
-      </div>
-      <div class="mp-batch-row single">
-        <select data-role="onExists" title="已有文件处理">
-          <option value="skip">已有则跳过</option>
-          <option value="overwrite">覆盖重下</option>
-        </select>
-      </div>
-      <div class="mp-batch-row">
-        <select data-role="scanRange" title="读取范围">
-          <option value="all">全部历史</option>
-          <option value="10">最近 10 页</option>
-          <option value="20">最近 20 页</option>
-          <option value="50">最近 50 页</option>
-        </select>
-        <button data-action="scan">读取文章</button>
-      </div>
-      <div class="mp-batch-row">
-        <button class="primary" data-action="download" disabled>批量下载</button>
-        <button data-action="records">打开下载目录</button>
-      </div>
-      <div class="mp-batch-status" data-role="status">公众号已自动同步到新应用，无需点击这里。下方操作仅用于直接在当前网页读取和下载。</div>
-      <div class="mp-batch-list" data-role="list"></div>
-    `;
-    var state = { articles: [], currentTaskNames: [] };
-    var status = panel.querySelector('[data-role="status"]');
-    var list = panel.querySelector('[data-role="list"]');
-    var scanBtn = panel.querySelector('[data-action="scan"]');
-    var downloadBtn = panel.querySelector('[data-action="download"]');
-    function setStatus(text) {
-      status.textContent = text;
-    }
-    function setBusy(busy) {
-      scanBtn.disabled = busy;
-      downloadBtn.disabled = busy || state.articles.length === 0;
-    }
-    panel.querySelector('[data-action="hide"]').onclick = function () {
-      panel.style.display = "none";
-    };
-    panel.querySelector('[data-action="records"]').onclick = async function () {
-      var subdir = safe_filename(panel.querySelector('[data-role="subdir"]').value || defaultSubdir);
-      await open_download_directory(subdir);
-    };
-    scanBtn.onclick = async function () {
-      try {
-        setBusy(true);
-        list.innerHTML = "";
-        var range = panel.querySelector('[data-role="scanRange"]').value || "all";
-        var maxPages = range === "all" ? 2000 : Number(range);
-        state.articles = await fetch_mp_articles(acct, maxPages, setStatus);
-        downloadBtn.disabled = state.articles.length === 0;
-        if (state.articles.partialError) {
-          setStatus(`部分读取：${state.articles.length} 篇、${state.articles.pagesRead || 0} 页。${state.articles.partialError}，请刷新文章后重试。`);
-        } else if (state.articles.hitLimit) {
-          setStatus(`已读取：${state.articles.length} 篇、${state.articles.pagesRead || 0} 页（已到所选范围上限，后面还有文章）`);
-        } else {
-          setStatus(`已读取全部历史：${state.articles.length} 篇、${state.articles.pagesRead || 0} 页`);
-        }
-        list.innerHTML = state.articles
-          .map((article, index) => `<span class="mp-batch-item">${index + 1}. ${escape_html(article.title)}</span>`)
-          .join("");
-      } catch (error) {
-        setStatus(`读取失败：${error.message || error}`);
-      } finally {
-        setBusy(false);
-      }
-    };
-    downloadBtn.onclick = async function () {
-      try {
-        setBusy(true);
-        var ok = 0;
-        var skipped = 0;
-        var subdir = safe_filename(panel.querySelector('[data-role="subdir"]').value || defaultSubdir);
-        var onExists = panel.querySelector('[data-role="onExists"]').value || "skip";
-        state.currentTaskNames = [];
-        for (var i = 0; i < state.articles.length; i += 1) {
-          setStatus(`正在创建下载任务 ${i + 1}/${state.articles.length}\n${state.articles[i].title}`);
-          var result = await create_article_task(state.articles[i], i, subdir, onExists);
-          if (result && result.filename) state.currentTaskNames.push(result.filename);
-          if (result && result.skipped) {
-            skipped += 1;
-          } else {
-            ok += 1;
-          }
-        }
-        setStatus(`本次处理 ${state.articles.length} 篇：新建 ${ok} 个，跳过 ${skipped} 个。点击“打开下载目录”查看文件。`);
-      } catch (error) {
-        setStatus(`下载任务创建失败：${error.message || error}`);
-      } finally {
-        setBusy(false);
-      }
-    };
-    document.body.appendChild(panel);
-  }
+  // Historical list collection is provided by the native macOS app.
+  // Keep single-page export below, but do not inject a second batch UI.
   function insert_rss_button(acct) {
     if (!acct.biz || !acct.key) {
       return;
@@ -981,7 +876,6 @@
           connect(currentCredentials).catch(function (err) {
             console.log("mp websocket connect failed", err);
           });
-          render_batch_panel(currentCredentials);
           if (window.cgiDataNew) insert_download_button();
         }, 800);
       });
@@ -989,15 +883,8 @@
         var currentCredentials = build_article_credentials();
         insert_style();
         register_account(currentCredentials);
-        render_batch_panel(currentCredentials);
       }, 1500);
       return;
-    }
-    if (location.hostname === "mp.weixin.qq.com") {
-      setTimeout(function () {
-        insert_style();
-        render_batch_panel(build_page_account());
-      }, 1200);
     }
   }
   function boot_official_account_tools() {
@@ -1016,11 +903,6 @@
     if (location.pathname === "/s") {
       register_account(account);
     }
-    if (document.querySelector("#__mp_article_batch_panel__")) {
-      return;
-    }
-    insert_style();
-    render_batch_panel(account);
   }
   insert_channels_style();
   boot_official_account_tools();

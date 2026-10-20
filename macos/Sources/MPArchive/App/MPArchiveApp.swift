@@ -21,16 +21,24 @@ import SwiftUI
  @StateObject private var library = Library()
  var body: some Scene {
   WindowGroup("公众号文章下载器", id: "main") {
-   ContentView(backend: backend, library: library)
+   GeometryReader { geometry in
+    ContentView(backend: backend, library: library)
+     .frame(width:geometry.size.width,height:geometry.size.height)
+     .background(WindowLayoutProbe(selection:library.selected))
+   }
     .frame(minWidth: 960, minHeight: 640)
     .task {AppDelegate.backend = backend;if !backend.running && !backend.busy {await backend.launch()};library.begin(backend)}
   }.defaultSize(width: 1180, height: 780)
+   .windowStyle(.titleBar)
+   .windowToolbarStyle(.expanded)
    .commands {
     CommandGroup(replacing: .newItem) {}
     CommandMenu("文章库") {
      Button("刷新公众号") {Task{await library.refresh()}}.keyboardShortcut("r")
-     Button("下载所选文章") {Task{await library.enqueue(selectedOnly: true)}}.keyboardShortcut("d").disabled(library.selectedArticles.isEmpty)
-     Button("打开导出目录") {NSWorkspace.shared.open(backend.downloads)}.keyboardShortcut("o",modifiers:[.command,.shift])
+     Button("连接微信") {Task{await library.connectNative()}}.disabled(library.nativeBusy || !backend.running)
+     Button("操作指引") {library.selected = "welcome"}
+     Button("下载所选文章…") {library.requestDownload(selectedOnly:true)}.keyboardShortcut("d").disabled(library.selectedArticles.isEmpty || library.queueing)
+     Button("打开导出目录") {library.openDirectory(backend.downloads)}.keyboardShortcut("o",modifiers:[.command,.shift])
     }
    }
   Settings {SettingsView(backend: backend,library:library).frame(width: 540)}

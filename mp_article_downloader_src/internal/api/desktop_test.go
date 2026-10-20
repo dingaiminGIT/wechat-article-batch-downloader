@@ -211,8 +211,8 @@ func TestFastBatchVerificationStopsRemainingQueue(t *testing.T) {
 	}
 	task.Meta.Req.Labels["download_mode"] = "safe"
 	event := &downloadpkg.Event{Key: downloadpkg.EventKeyError, Task: task, Err: errors.New("微信要求完成访问验证")}
-	if got := fastBatchVerificationID(event); got != "" {
-		t.Fatalf("safe batch should not trigger automatic pause: %q", got)
+	if got := fastBatchVerificationID(event); got != "fast-batch" {
+		t.Fatalf("safe batch must also pause on verification: %q", got)
 	}
 }
 
@@ -234,5 +234,16 @@ func TestSummarizeDownloadBatchesUsesLatestBatchAndTotalHint(t *testing.T) {
 	}
 	if s.StartedAt != 200000 || s.FinishedAt != 0 {
 		t.Fatalf("unexpected timing: %+v", s)
+	}
+}
+
+func TestSummaryAllPreservesOlderPausedBatchAndTermination(t *testing.T) {
+	tasks := []*downloadpkg.Task{
+		summaryTask(t, "/downloads/account", "pause", time.Unix(100, 0), map[string]string{"batch_id": "paused"}),
+		summaryTask(t, "/downloads/account", "canceled", time.Unix(200, 0), map[string]string{"batch_id": "stopped"}),
+	}
+	summaries := summarizeDownloadBatches(tasks, nil, true)
+	if len(summaries) != 2 || summaries[0].BatchID != "stopped" || summaries[0].Canceled != 1 || summaries[0].FinishedAt == 0 || summaries[1].Paused != 1 || summaries[1].FinishedAt != 0 {
+		t.Fatalf("incorrect batch state: %+v", summaries)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"mp_article_batch_downloader/internal/assets"
 	"mp_article_batch_downloader/internal/channels"
 	downloaderclient "mp_article_batch_downloader/internal/downloader"
+	"mp_article_batch_downloader/internal/nativebridge"
 	"mp_article_batch_downloader/internal/officialaccount"
 	"mp_article_batch_downloader/pkg/decrypt"
 	"mp_article_batch_downloader/pkg/system"
@@ -31,19 +32,21 @@ import (
 )
 
 type APIClient struct {
-	taskCreateMu  sync.Mutex
-	taskErrorMu   sync.Mutex
-	taskErrors    map[string]string
-	archive       *archive.Manager
-	downloader    *downloadpkg.Downloader
-	official      *officialaccount.OfficialAccountClient
-	channels      *channels.ChannelsClient
-	downloader_ws *downloaderclient.DownloaderClient
-	filehelper    *FileHelperHandler
-	formatter     *util.FilenameProcessor
-	cfg           *APIConfig
-	engine        *gin.Engine
-	logger        *zerolog.Logger
+	batchControlMu sync.Mutex
+	taskCreateMu   sync.Mutex
+	taskErrorMu    sync.Mutex
+	taskErrors     map[string]string
+	archive        *archive.Manager
+	native         *nativebridge.Client
+	downloader     *downloadpkg.Downloader
+	official       *officialaccount.OfficialAccountClient
+	channels       *channels.ChannelsClient
+	downloader_ws  *downloaderclient.DownloaderClient
+	filehelper     *FileHelperHandler
+	formatter      *util.FilenameProcessor
+	cfg            *APIConfig
+	engine         *gin.Engine
+	logger         *zerolog.Logger
 }
 
 func NewAPIClient(cfg *APIConfig, parent_logger *zerolog.Logger) *APIClient {
@@ -205,6 +208,9 @@ func (c *APIClient) Start() error {
 func (c *APIClient) Stop() error {
 	if c.archive != nil {
 		c.archive.Close()
+	}
+	if c.native != nil {
+		c.native.Close()
 	}
 	if c.downloader != nil {
 		c.downloader.Pause(&downloadpkg.TaskFilter{Statuses: []base.Status{base.DownloadStatusRunning, base.DownloadStatusWait, base.DownloadStatusReady}})
